@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import apiClient, { getApiErrorMessage } from '../api/client'
+import Icon from '../components/Icon'
+import QuickPreferences from '../components/QuickPreferences'
+import { usePreferences } from '../context/PreferencesContext'
 
 const CHECKOUT_SCRIPT = 'https://checkout.razorpay.com/v1/checkout.js'
 
@@ -19,16 +22,20 @@ function loadRazorpayScript() {
     const script = document.createElement('script')
     script.src = CHECKOUT_SCRIPT
     script.onload = () => resolve(true)
-    script.onerror = () => resolve(false)
+    script.onerror = () => {
+      script.remove()
+      resolve(false)
+    }
     document.body.appendChild(script)
   })
 }
 
 export default function CheckoutPage() {
+  const { t, locale, language } = usePreferences()
   const [params] = useSearchParams()
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(null)
   const [paid, setPaid] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const orderId = params.get('order_id')
@@ -46,81 +53,94 @@ export default function CheckoutPage() {
         setIsLoading(false)
       }
     })
-    return () => {
-      mounted = false
-    }
+    return () => { mounted = false }
   }, [])
 
-  async function openCheckout() {
+  function openCheckout() {
+    if (!validSession || !scriptReady || busy) return
     setBusy(true)
-    setError('')
-    const checkout = new window.Razorpay({
-      key: keyId,
-      order_id: orderId,
-      amount,
-      currency,
-      name: 'Fraud Detection Demo',
-      description: 'Razorpay test payment',
-      theme: { color: '#047857' },
-      handler: async (response) => {
-        try {
-          await apiClient.post('/api/payments/verify', {
-            sessionToken,
-            razorpay_payment_id: response.razorpay_payment_id,
-            razorpay_order_id: response.razorpay_order_id,
-            razorpay_signature: response.razorpay_signature,
-          })
-          setPaid(true)
-        } catch (verificationError) {
-          setError(getApiErrorMessage(verificationError, 'We could not confirm this payment. Please check the dashboard before retrying.'))
-        } finally {
-          setBusy(false)
-        }
-      },
-      modal: {
-        ondismiss: () => setBusy(false),
-      },
-    })
-    checkout.on('payment.failed', (event) => {
-      setError(event.error?.description || 'The test payment did not complete. You can try again.')
+    setError(null)
+    try {
+      const checkout = new window.Razorpay({
+        key: keyId,
+        order_id: orderId,
+        amount,
+        currency,
+        name: 'Fraud Detection Demo',
+        description: 'Razorpay test payment',
+        theme: { color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c3aed' },
+        handler: async (response) => {
+          try {
+            await apiClient.post('/api/payments/verify', {
+              sessionToken,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+            })
+            setPaid(true)
+          } catch (verificationError) {
+            setError({ kind: 'verification', cause: verificationError })
+          } finally {
+            setBusy(false)
+          }
+        },
+        modal: { ondismiss: () => setBusy(false) },
+      })
+      checkout.on('payment.failed', (event) => {
+        setError({ kind: 'provider', message: event.error?.description })
+        setBusy(false)
+      })
+      checkout.open()
+    } catch {
+      setError({ kind: 'launch' })
       setBusy(false)
-    })
-    checkout.open()
+    }
   }
 
-  let formattedAmount
-  try {
-    formattedAmount = new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: currency.toUpperCase(),
-    }).format(amount / 100)
-  } catch {
-    formattedAmount = `${(amount / 100).toFixed(2)} ${currency.toUpperCase()}`
+  let formattedAmount = '—'
+  if (Number.isFinite(amount) && amount > 0) {
+    try {
+      formattedAmount = new Intl.NumberFormat(locale, { style: 'currency', currency: currency.toUpperCase() }).format(amount / 100)
+    } catch {
+      formattedAmount = `${(amount / 100).toFixed(2)} ${currency.toUpperCase()}`
+    }
   }
+  const errorMessage = error?.kind === 'verification'
+    ? getApiErrorMessage(error.cause, t('We could not confirm this payment. Please check the dashboard before retrying.', 'भुगतान की पुष्टि नहीं हो सकी। फिर कोशिश करने से पहले डैशबोर्ड जाँचें।'), language)
+    : error?.kind === 'provider'
+      ? t(error.message || 'The test payment did not complete. You can try again.', 'टेस्ट भुगतान पूरा नहीं हुआ। आप फिर कोशिश कर सकते हैं।')
+      : error ? t('Checkout could not open. Refresh this page and try again.', 'भुगतान की विंडो नहीं खुल सकी। पेज रीफ़्रेश करके फिर कोशिश करें।') : ''
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
-      <section className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-7 shadow-sm sm:p-9">
-        <p className="text-sm font-semibold text-emerald-700">Razorpay test checkout</p>
-        <h1 className="mt-2 text-2xl font-bold text-slate-950">
-          {paid ? 'Test payment confirmed' : 'Complete demo payment'}
-        </h1>
+    <main className="auth-page">
+      <div className="auth-toolbar flex flex-wrap items-center justify-between gap-4">
+        <Link className="flex items-center gap-3 font-bold" to="/"><Icon name="shield" size={28} />{t('Fraud Detection', 'धोखाधड़ी की पहचान')}</Link>
+        <QuickPreferences />
+      </div>
+      <section className="ui-card checkout-card mx-auto w-full max-w-xl p-6 sm:p-9">
+        <span className="accent-icon mb-5 inline-flex"><Icon name={paid ? 'check' : 'lock'} size={28} /></span>
+        <p className="eyebrow">{t('Razorpay test checkout', 'Razorpay टेस्ट भुगतान')}</p>
+        <h1 className="mt-2 text-3xl font-bold">{paid ? t('Test payment confirmed', 'टेस्ट भुगतान की पुष्टि हो गई') : t('Complete demo payment', 'डेमो भुगतान पूरा करें')}</h1>
         {paid ? (
-          <>
-            <p className="mt-3 text-sm leading-6 text-slate-600">Razorpay confirmed the test payment. The backend has sent the transaction to the fraud model.</p>
-            <Link className="mt-6 inline-flex rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white" to="/">Return to dashboard</Link>
-          </>
+          <div aria-live="polite" className="mt-4 space-y-5" role="status">
+            <p className="text-muted text-sm leading-relaxed">{t('Razorpay confirmed the test payment. The backend has sent the transaction to the fraud model.', 'Razorpay ने टेस्ट भुगतान की पुष्टि कर दी। बैकएंड ने लेन-देन को धोखाधड़ी जाँचने वाले मॉडल तक भेज दिया है।')}</p>
+            <Link className="ui-button ui-button-primary w-full" to="/">{t('Return to dashboard', 'डैशबोर्ड पर वापस जाएँ')}<Icon name="arrow" size={18} /></Link>
+          </div>
         ) : (
           <>
-            <p className="mt-3 text-sm leading-6 text-slate-600">Amount: <strong className="text-slate-900">{formattedAmount}</strong>. Test mode simulates payment and does not move real money.</p>
-            {!validSession && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-800">This checkout link is incomplete or expired. Return to the dashboard and start again.</p>}
-            {isLoading && <p className="mt-5 text-sm text-slate-500">Loading Razorpay checkout…</p>}
-            {!isLoading && !scriptReady && <p className="mt-5 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900">Razorpay checkout could not load. Check your internet connection and refresh this page.</p>}
-            {error && <p className="mt-5 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{error}</p>}
-            <button className="mt-6 w-full rounded-xl bg-emerald-700 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!validSession || !scriptReady || busy} onClick={openCheckout} type="button">
-              {busy ? 'Waiting for payment…' : 'Continue to secure test checkout'}
+            <div className="checkout-total my-6 rounded-2xl border p-5" style={{ borderColor: 'var(--border)' }}>
+              <p className="text-muted text-sm">{t('Amount', 'राशि')}</p>
+              <p className="mt-1 text-3xl font-bold">{formattedAmount}</p>
+              <p className="text-muted mt-3 text-xs leading-relaxed">{t('Test mode simulates a payment. No real money is moved.', 'टेस्ट मोड में भुगतान का अभ्यास होता है। असली पैसे नहीं कटते।')}</p>
+            </div>
+            {!validSession && <p className="status-error mt-4 text-sm" role="alert">{t('This checkout link is incomplete or expired. Return to the dashboard and start again.', 'यह भुगतान लिंक अधूरा है या इसकी अवधि समाप्त हो गई है। डैशबोर्ड से फिर शुरू करें।')}</p>}
+            {isLoading && <p className="text-muted mt-5 text-sm" role="status">{t('Loading Razorpay checkout…', 'Razorpay भुगतान लोड हो रहा है…')}</p>}
+            {!isLoading && !scriptReady && <p className="status-notice mt-5 text-sm" role="alert">{t('Razorpay checkout could not load. Check your internet connection and refresh this page.', 'Razorpay भुगतान लोड नहीं हो सका। इंटरनेट जाँचें और पेज रीफ़्रेश करें।')}</p>}
+            {errorMessage && <p className="status-error mt-5 text-sm" role="alert">{errorMessage}</p>}
+            <button className="ui-button ui-button-primary mt-6 w-full" disabled={!validSession || !scriptReady || busy} onClick={openCheckout} type="button">
+              <Icon name="lock" size={18} />{busy ? t('Waiting for payment…', 'भुगतान का इंतज़ार है…') : t('Continue to secure test checkout', 'सुरक्षित टेस्ट भुगतान पर जाएँ')}
             </button>
-            <Link className="mt-4 block text-center text-sm font-medium text-slate-600 underline" to="/">Cancel and return</Link>
+            <Link className="text-muted mt-5 block text-center text-sm font-medium underline underline-offset-4" to="/">{t('Cancel and return', 'रद्द करें और वापस जाएँ')}</Link>
           </>
         )}
       </section>

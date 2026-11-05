@@ -31,6 +31,7 @@ from app.schemas import (
     CheckoutInput,
     LoginInput,
     PaymentVerification,
+    ProfileInput,
     RegisterInput,
     ReviewInput,
     SimulateInput,
@@ -365,6 +366,22 @@ def login(body: LoginInput, request: Request):
 @app.get("/api/auth/me")
 def me(user: dict = Depends(current_user)):
     return {"user": public_user(user)}
+
+
+@app.patch("/api/auth/me")
+def update_profile(body: ProfileInput, request: Request, user: dict = Depends(current_user)):
+    try:
+        updated = request.app.state.db.users.find_one_and_update(
+            {"_id": user["_id"]},
+            {"$set": {"name": body.name, "email": str(body.email).lower()}},
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        fail(409, "An account with this email already exists.", "EMAIL_EXISTS")
+    if not updated:
+        fail(401, "User account was not found.", "UNAUTHORIZED")
+    # Tokens identify the immutable user ID, so an email edit preserves the session.
+    return {"user": public_user(updated)}
 
 
 @app.post("/api/predictions/batch")

@@ -1,9 +1,10 @@
 import { AxiosError } from 'axios'
-import { createMockTransaction, mockTransactions } from './mockData'
+import { createMockTransaction, mockTransactions } from './mockData.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const HOUR_MS = 60 * 60 * 1000
-const users = new Map()
+const MOCK_USERS_KEY = 'fraud-dashboard-mock-users-v1'
+const users = restoreUsers()
 const transactions = [...mockTransactions]
 let transactionSequence = mockTransactions.length
 const predictionFeatureNames = [
@@ -90,24 +91,50 @@ function getHeader(config, name) {
   )
 }
 
-function makeUser(email, name) {
+function restoreUsers() {
+  try {
+    const saved = JSON.parse(globalThis.localStorage?.getItem(MOCK_USERS_KEY) || '[]')
+    if (!Array.isArray(saved)) return new Map()
+    return new Map(saved.filter((user) => (
+      user && typeof user.id === 'string' && user.id.startsWith('mock-user-') &&
+      typeof user.name === 'string' && user.name.length > 0 && user.name.length <= 120 &&
+      typeof user.email === 'string' && user.email.length <= 254 && validateEmail(user.email)
+    )).map((user) => {
+      const email = user.email.trim().toLowerCase()
+      return [email, { id: user.id, name: user.name, email, role: 'merchant' }]
+    }))
+  } catch {
+    return new Map()
+  }
+}
+
+function persistUsers() {
+  try {
+    globalThis.localStorage?.setItem(MOCK_USERS_KEY, JSON.stringify([...users.values()]))
+  } catch {
+    // Restricted browser storage still allows an in-memory demo session.
+  }
+}
+
+function makeUser(email, name, legacyId) {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   const existingUser = users.get(normalizedEmail)
   if (existingUser) return existingUser
 
   const defaultName = normalizedEmail.split('@')[0] || 'Merchant'
   const user = {
-    id: 'mock-user-' + encodeURIComponent(normalizedEmail),
+    id: legacyId || 'mock-user-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2)),
     name: String(name || defaultName).trim(),
     email: normalizedEmail,
     role: 'merchant',
   }
   users.set(normalizedEmail, user)
+  persistUsers()
   return user
 }
 
 function tokenForUser(user) {
-  return 'mock-token-' + encodeURIComponent(user.email)
+  return 'mock-session-' + encodeURIComponent(user.id)
 }
 
 function userFromToken(config) {
@@ -115,12 +142,18 @@ function userFromToken(config) {
   if (!authorization.startsWith('Bearer ')) return null
 
   const token = authorization.slice('Bearer '.length)
-  if (!token.startsWith('mock-token-')) return null
 
   try {
+    if (token.startsWith('mock-session-')) {
+      const id = decodeURIComponent(token.slice('mock-session-'.length))
+      return [...users.values()].find((user) => user.id === id) || null
+    }
+    if (!token.startsWith('mock-token-')) return null
     const email = decodeURIComponent(token.slice('mock-token-'.length))
-    if (!email) return null
-    return makeUser(email)
+    if (!validateEmail(email)) return null
+    // Older demo sessions used email tokens; retain their identity after an email edit.
+    const legacyId = 'mock-user-' + encodeURIComponent(email.trim().toLowerCase())
+    return [...users.values()].find((user) => user.id === legacyId) || makeUser(email, undefined, legacyId)
   } catch {
     return null
   }
@@ -393,7 +426,7 @@ function checkoutSession(config, body) {
   const currency = String(body.currency || '').toLowerCase()
   const mode = body.mode
 
-  if (!Number.isFinite(amount) || amount < 1 || currency !== 'usd' || !['normal', 'fraud-demo'].includes(mode)) {
+  if (!Number.isFinite(amount) || amount < 1 || amount > 999999.99 || !['inr', 'usd'].includes(currency) || !['normal', 'fraud-demo'].includes(mode)) {
     rejectRequest(config, 422, 'Checkout details are not valid.', 'INVALID_INPUT')
   }
 
@@ -436,7 +469,7 @@ export default async function mockApiAdapter(config) {
       const email = String(body.email || '').trim().toLowerCase()
       const password = String(body.password || '')
 
-      if (!name || !validateEmail(email) || password.length < 8) {
+      if (!name || name.length > 120 || email.length > 254 || !validateEmail(email) || password.length < 8) {
         rejectRequest(
           config,
           422,
@@ -472,6 +505,27 @@ export default async function mockApiAdapter(config) {
     if (method === 'get' && pathname === '/api/auth/me') {
       const user = requireUser(config)
       return makeResponse(config, 200, { user })
+    }
+
+    if (method === 'patch' && pathname === '/api/auth/me') {
+      const user = requireUser(config)
+      if (
+        !body || Array.isArray(body) || Object.keys(body).some((key) => !['name', 'email'].includes(key)) ||
+        typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 120 ||
+        typeof body.email !== 'string' || body.email.trim().length > 254 || !validateEmail(body.email)
+      ) {
+        rejectRequest(config, 422, 'Enter a name and a valid email address.', 'VALIDATION_ERROR')
+      }
+      const email = body.email.trim().toLowerCase()
+      const existingUser = users.get(email)
+      if (existingUser && existingUser.id !== user.id) {
+        rejectRequest(config, 409, 'An account with this email already exists.', 'EMAIL_EXISTS')
+      }
+      const updated = { ...user, name: body.name.trim(), email }
+      users.delete(user.email)
+      users.set(email, updated)
+      persistUsers()
+      return makeResponse(config, 200, { user: updated })
     }
 
     if (method === 'post' && pathname === '/api/predictions/batch') {

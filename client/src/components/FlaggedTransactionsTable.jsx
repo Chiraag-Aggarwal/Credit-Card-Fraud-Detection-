@@ -1,155 +1,45 @@
-const riskClasses = {
-  LOW: 'bg-emerald-100 text-emerald-800',
-  MEDIUM: 'bg-amber-100 text-amber-900',
-  HIGH: 'bg-rose-100 text-rose-800',
-  UNSCORED: 'bg-slate-100 text-slate-700',
+import RiskBadge from './RiskBadge'
+import { usePreferences } from '../context/PreferencesContext'
+import { formatTime, formatAmount, formatProbability, sourceText, statusText } from '../utils/transactionDisplay'
+
+function ReviewActions({ item, reviewingId, explainingId, onReview, onExplain }) {
+  const { t } = usePreferences()
+  const isReviewing = reviewingId === item.id
+  return <div className="flex flex-wrap gap-2">
+    <button className="ui-button text-xs" disabled={item.scoringStatus !== 'scored' || Boolean(explainingId) || Boolean(reviewingId)} onClick={() => onExplain(item.id)} type="button">{explainingId === item.id ? t('Explaining…', 'समझाया जा रहा है…') : t('Why this score?', 'यह स्कोर क्यों?')}</button>
+    {item.reviewDecision ? <span role="status" className="status-badge">{isReviewing ? t('Saving…', 'सहेजा जा रहा है…') : item.reviewDecision === 'confirmed_fraud' ? t('Confirmed fraud', 'धोखाधड़ी की पुष्टि') : t('Marked legit', 'सही चिह्नित')}</span> : <>
+      <button className="ui-button ui-button-danger text-xs" disabled={Boolean(reviewingId)} onClick={() => onReview(item.id, 'confirmed_fraud')} type="button">{t('Confirm fraud', 'धोखाधड़ी की पुष्टि')}</button>
+      <button className="ui-button text-xs" disabled={Boolean(reviewingId)} onClick={() => onReview(item.id, 'legit')} type="button">{t('Mark legit', 'सही चिह्नित करें')}</button>
+    </>}
+  </div>
 }
 
-function formatTime(value) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? '—'
-    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
-}
-
-function formatAmount(amount, currency) {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: String(currency || 'usd').toUpperCase(),
-    }).format(amount)
-  } catch {
-    return Number(amount || 0).toFixed(2) + ' ' + String(currency || 'usd').toUpperCase()
-  }
-}
-
-function formatProbability(value) {
-  if (value === null || value === undefined) return '—'
-  return new Intl.NumberFormat(undefined, {
-    style: 'percent',
-    maximumFractionDigits: 1,
-  }).format(value)
-}
-
-function reviewLabel(decision) {
-  return decision === 'confirmed_fraud' ? 'Confirmed fraud' : 'Marked legit'
-}
-
-export default function FlaggedTransactionsTable({
-  items,
-  reviewingId,
-  explainingId,
-  onReview,
-  onExplain,
-}) {
-  if (items.length === 0) {
-    return (
-      <div className="rounded-2xl border border-slate-200 bg-white px-6 py-14 text-center shadow-sm">
-        <p className="text-sm font-semibold text-slate-900">No flagged transactions found</p>
-        <p className="mt-2 text-sm text-slate-500">Try changing the filters or check back later.</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="overflow-x-auto">
-        <table className="min-w-[1180px] w-full border-collapse text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="px-5 py-3 font-semibold">Time</th>
-              <th className="px-5 py-3 font-semibold">Amount</th>
-              <th className="px-5 py-3 font-semibold">Probability</th>
-              <th className="px-5 py-3 font-semibold">Risk</th>
-              <th className="px-5 py-3 font-semibold">Source</th>
-              <th className="px-5 py-3 font-semibold">Scoring status</th>
-              <th className="px-5 py-3 font-semibold">Model insight</th>
-              <th className="px-5 py-3 font-semibold">Review</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {items.map((transaction) => {
-              const isReviewing = reviewingId === transaction.id
-              return (
-                <tr className="align-top hover:bg-slate-50/70" key={transaction.id}>
-                  <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                    {formatTime(transaction.createdAt)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-4 font-semibold text-slate-900">
-                    {formatAmount(transaction.displayAmount, transaction.currency)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                    {formatProbability(transaction.fraudProbability)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-4">
-                    <span
-                      className={
-                        'inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ' +
-                        (riskClasses[transaction.riskLabel] || riskClasses.UNSCORED)
-                      }
-                    >
-                      {transaction.riskLabel}
-                    </span>
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                    {transaction.source === 'razorpay'
-                      ? 'Razorpay'
-                      : transaction.source === 'stripe'
-                        ? 'Stripe (legacy)'
-                        : 'Simulated'}
-                  </td>
-                  <td className="px-5 py-4">
-                    <span className="text-sm text-slate-700">
-                      {transaction.scoringStatus === 'pending_review' ? 'Pending review' : 'Scored'}
-                    </span>
-                    {transaction.scoringStatus === 'pending_review' && (
-                      <span className="mt-2 block max-w-56 rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-medium leading-5 text-slate-700">
-                        Model unavailable - needs manual review
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-5 py-4">
-                    <button
-                      className="whitespace-nowrap rounded-lg border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-800 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={transaction.scoringStatus !== 'scored' || Boolean(explainingId)}
-                      onClick={() => onExplain(transaction.id)}
-                      type="button"
-                    >
-                      {explainingId === transaction.id ? 'Explaining...' : 'Why this score?'}
-                    </button>
-                  </td>
-                  <td className="px-5 py-4">
-                    {transaction.reviewDecision ? (
-                      <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                        {reviewLabel(transaction.reviewDecision)}
-                      </span>
-                    ) : (
-                      <div className="flex min-w-44 flex-col gap-2">
-                        <button
-                          className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-rose-800 disabled:cursor-wait disabled:opacity-60"
-                          disabled={Boolean(reviewingId)}
-                          onClick={() => onReview(transaction.id, 'confirmed_fraud')}
-                          type="button"
-                        >
-                          {isReviewing ? 'Saving...' : 'Confirm fraud'}
-                        </button>
-                        <button
-                          className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
-                          disabled={Boolean(reviewingId)}
-                          onClick={() => onReview(transaction.id, 'legit')}
-                          type="button"
-                        >
-                          {isReviewing ? 'Saving...' : 'Mark legit'}
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+export default function FlaggedTransactionsTable({ items, reviewingId, explainingId, onReview, onExplain }) {
+  const { t, locale } = usePreferences()
+  const actions = { reviewingId, explainingId, onReview, onExplain }
+  if (items.length === 0) return <div className="ui-card px-6 py-14 text-center"><p className="font-semibold">{t('No flagged transactions found', 'कोई चिह्नित लेन-देन नहीं मिला')}</p><p className="text-muted mt-2 text-sm">{t('Try changing the filters or check back later.', 'फ़िल्टर बदलें या बाद में दोबारा देखें।')}</p></div>
+  return <section className="ui-card min-w-0 overflow-hidden">
+    <div className="px-5 py-5"><h2 className="text-lg font-bold">{t('Review queue', 'समीक्षा सूची')}</h2><p className="text-muted mt-1 text-xs">{t('Check the model insight before recording a decision.', 'निर्णय दर्ज करने से पहले मॉडल का कारण देखें।')}</p></div>
+    <div className="table-scroll hidden xl:block" tabIndex={0} role="region" aria-label={t('Flagged transactions table', 'चिह्नित लेन-देन की तालिका')}>
+      <table className="data-table w-full min-w-[1100px] text-left text-sm">
+        <thead><tr>{[['Transaction', 'लेन-देन'], ['Amount', 'राशि'], ['Probability', 'संभावना'], ['Risk', 'जोखिम'], ['Scoring status', 'स्कोर की स्थिति'], ['Review', 'समीक्षा']].map(([en, hi]) => <th scope="col" key={en}>{t(en, hi)}</th>)}</tr></thead>
+        <tbody>{items.map((item) => <tr className="align-top" key={item.id}>
+          <td><p className="whitespace-nowrap">{formatTime(item.createdAt, locale)}</p><p className="text-muted mt-1 text-xs">{sourceText(item.source, t)}</p></td>
+          <td className="whitespace-nowrap font-semibold">{formatAmount(item.displayAmount, item.currency, locale)}</td>
+          <td>{formatProbability(item.fraudProbability, locale)}</td><td><RiskBadge risk={item.riskLabel} /></td>
+          <td>{statusText(item.scoringStatus, t)}{item.scoringStatus === 'pending_review' && <p className="notice notice-warning mt-2 max-w-64 text-xs">{t('Model unavailable - needs manual review', 'मॉडल उपलब्ध नहीं — मैन्युअल समीक्षा ज़रूरी है')}</p>}</td>
+          <td><ReviewActions item={item} {...actions} /></td>
+        </tr>)}</tbody>
+      </table>
     </div>
-  )
+    <ul className="mobile-transaction-list grid gap-4 px-4 pb-4 md:grid-cols-2 xl:hidden">
+      {items.map((item) => <li className="transaction-mobile-card" key={item.id}>
+        <div className="flex items-start justify-between gap-3"><div><p className="text-lg font-bold">{formatAmount(item.displayAmount, item.currency, locale)}</p><p className="text-muted mt-1 text-xs">{formatTime(item.createdAt, locale)}</p></div><RiskBadge risk={item.riskLabel} /></div>
+        <dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-muted text-xs">{t('Fraud probability', 'धोखाधड़ी की संभावना')}</dt><dd className="mt-1 font-semibold">{formatProbability(item.fraudProbability, locale)}</dd></div><div><dt className="text-muted text-xs">{t('Source', 'स्रोत')}</dt><dd className="mt-1">{sourceText(item.source, t)}</dd></div></dl>
+        <p className="text-muted my-3 text-xs">{statusText(item.scoringStatus, t)}</p>
+        {item.scoringStatus === 'pending_review' && <p className="notice notice-warning mb-3 text-xs">{t('Model unavailable - needs manual review', 'मॉडल उपलब्ध नहीं — मैन्युअल समीक्षा ज़रूरी है')}</p>}
+        <ReviewActions item={item} {...actions} />
+      </li>)}
+    </ul>
+  </section>
 }

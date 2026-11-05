@@ -16,6 +16,11 @@ class LoginInput(StrictModel):
     password: str = Field(min_length=1)
 
 
+class ProfileInput(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: EmailStr = Field(max_length=254)
+
+
 class SimulateInput(StrictModel):
     count: int = Field(ge=1, le=50)
     mode: str

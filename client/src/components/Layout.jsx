@@ -1,75 +1,52 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import AlertBell from './AlertBell'
+import Icon from './Icon'
+import QuickPreferences from './QuickPreferences'
 import { useAuth } from '../context/AuthContext'
+import { usePreferences } from '../context/PreferencesContext'
 
-function navigationClass({ isActive }) {
-  return isActive
-    ? 'rounded-lg bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800'
-    : 'rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900'
-}
+const isMockMode = import.meta.env.VITE_USE_MOCK === 'true'
 
 export default function Layout() {
   const { user, logout } = useAuth()
+  const { t } = usePreferences()
   const navigate = useNavigate()
-  const isMockMode = import.meta.env.VITE_USE_MOCK === 'true'
+  const links = [
+    { to: '/', icon: 'dashboard', label: t('Dashboard', 'डैशबोर्ड'), short: t('Overview', 'सारांश') },
+    { to: '/flagged', icon: 'flag', label: t('Flagged transactions', 'संदिग्ध लेनदेन'), short: t('Flagged', 'संदिग्ध') },
+    { to: '/analyze', icon: 'layers', label: t('Batch AI analysis', 'बैच AI विश्लेषण'), short: t('Analyse', 'विश्लेषण') },
+    { to: '/profile', icon: 'user', label: t('My profile', 'मेरी प्रोफ़ाइल'), short: t('Profile', 'प्रोफ़ाइल') },
+    { to: '/settings', icon: 'settings', label: t('Appearance', 'दिखावट'), short: t('Settings', 'सेटिंग्स') },
+  ]
+  const initials = (user?.name || user?.email || 'U').split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
+  function handleLogout() { logout(); navigate('/login', { replace: true }) }
 
-  function handleLogout() {
-    logout()
-    navigate('/login', { replace: true })
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4 sm:px-8">
-          <div className="min-w-0">
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">
-              Payment risk console
-            </p>
-            <p className="mt-1 text-lg font-bold tracking-tight text-slate-950">
-              Fraud Detection Dashboard
-            </p>
-          </div>
-
-          <nav aria-label="Main navigation" className="flex w-full flex-wrap items-center gap-1 sm:w-auto">
-            <NavLink className={navigationClass} end to="/">
-              Dashboard
-            </NavLink>
-            <NavLink className={navigationClass} to="/flagged">
-              Flagged transactions
-            </NavLink>
-            <NavLink className={navigationClass} to="/analyze">
-              Batch AI analysis
-            </NavLink>
-            <AlertBell />
-
-          </nav>
-
-          <div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:justify-start">
-            {isMockMode && (
-              <span
-                className="rounded-full border border-amber-200 bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900"
-                role="status"
-              >
-                Mock data
-              </span>
-            )}
-            <span className="hidden text-sm text-slate-600 sm:block">
-              {user?.name || user?.email}
-            </span>
-            <button
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              onClick={handleLogout}
-              type="button"
-            >
-              Log out
-            </button>
-          </div>
+  return <div className="app-backdrop">
+    <a className="skip-link" href="#main-content">{t('Skip to content', 'मुख्य सामग्री पर जाएँ')}</a>
+    <div className="app-frame">
+      <aside className="sidebar">
+        <NavLink to="/" className="brand" aria-label={t('Fraud Detection dashboard', 'धोखाधड़ी पहचान डैशबोर्ड')}><span className="brand-mark"><Icon name="shield" size={34} /></span><span><strong>{t('Fraud Detection', 'धोखाधड़ी पहचान')}</strong><small>{t('Payment risk console', 'भुगतान जोखिम केंद्र')}</small></span></NavLink>
+        <p className="nav-caption">{t('WORKSPACE', 'कार्यस्थल')}</p>
+        <nav aria-label={t('Main navigation', 'मुख्य नेविगेशन')} className="desktop-nav">{links.map(link => <NavLink key={link.to} to={link.to} end={link.to === '/'} className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}><Icon name={link.icon} /><span>{link.label}</span></NavLink>)}</nav>
+        <div className="sidebar-bottom">
+          <div className="sidebar-note"><span className="status-dot" /><span>{t('A clearer view of risk.', 'जोखिम की साफ़ समझ।')}</span></div>
+          <button className="nav-link" type="button" onClick={handleLogout}><Icon name="logout" /><span>{t('Log out', 'लॉग आउट')}</span></button>
         </div>
-      </header>
-      <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
-        <Outlet />
-      </main>
+      </aside>
+      <div className="workspace">
+        <header className="topbar">
+          <div className="topbar-title"><Icon name="shield" /><span>{t('Payment risk console', 'भुगतान जोखिम केंद्र')}</span></div>
+          <div className="topbar-actions">
+            {isMockMode && <span className="mock-badge" role="status">{t('Mock data', 'डेमो डेटा')}</span>}
+            <QuickPreferences />
+            <AlertBell />
+            <NavLink className="profile-link" to="/profile" aria-label={t('Edit your profile', 'अपनी प्रोफ़ाइल बदलें')}><span className="avatar">{initials}</span><span className="profile-name">{user?.name || user?.email}</span></NavLink>
+          </div>
+        </header>
+        <main className="workspace-content" id="main-content" tabIndex={-1}><Outlet /></main>
+        <footer className="workspace-footer"><Icon name="shield" size={14} />{t('Fraud Detection · Student project', 'धोखाधड़ी पहचान · विद्यार्थी प्रोजेक्ट')}</footer>
+      </div>
     </div>
-  )
+    <nav className="mobile-nav" aria-label={t('Mobile navigation', 'मोबाइल नेविगेशन')}>{links.map(link => <NavLink key={link.to} to={link.to} end={link.to === '/'} className={({ isActive }) => 'mobile-nav-link' + (isActive ? ' active' : '')}><Icon name={link.icon} /><span>{link.short}</span></NavLink>)}</nav>
+  </div>
 }

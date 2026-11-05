@@ -1,5 +1,6 @@
 import axios from 'axios'
 import mockApiAdapter from '../mocks/mockApi'
+import { formatApiError } from '../utils/apiErrors'
 
 export const TOKEN_STORAGE_KEY = 'fraud-dashboard-token'
 
@@ -37,18 +38,8 @@ apiClient.interceptors.response.use(
   },
 )
 
-export function getApiErrorMessage(error, fallback) {
-  if (error?.response?.status === 429) {
-    const retryAfter = Number(error.response.headers?.['retry-after'])
-    if (Number.isFinite(retryAfter) && retryAfter > 0) {
-      const unit = retryAfter === 1 ? 'second' : 'seconds'
-      return `Too many requests. Please wait ${retryAfter} ${unit}, then try again.`
-    }
-    return 'Too many requests. Please wait a moment, then try again.'
-  }
-
-  const message = error?.response?.data?.error?.message
-  return typeof message === 'string' && message ? message : fallback
+export function getApiErrorMessage(error, fallback, language = typeof document === 'undefined' ? 'en' : document.documentElement.lang) {
+  return formatApiError(error, fallback, language)
 }
 
 export default apiClient

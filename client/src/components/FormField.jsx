@@ -10,20 +10,16 @@ export default function FormField({
   minLength,
   error,
 }) {
-  const inputClass = error
-    ? 'mt-2 w-full rounded-xl border border-rose-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none ring-2 ring-rose-100'
-    : 'mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100'
-
   return (
     <div>
-      <label className="text-sm font-semibold text-slate-700" htmlFor={id}>
+      <label className="block text-sm font-semibold" htmlFor={id}>
         {label}
       </label>
       <input
         aria-describedby={error ? id + '-error' : undefined}
         aria-invalid={Boolean(error)}
         autoComplete={autoComplete}
-        className={inputClass}
+        className="field-input mt-2 w-full"
         id={id}
         minLength={minLength}
         name={id}
@@ -34,7 +30,7 @@ export default function FormField({
         value={value}
       />
       {error && (
-        <p className="mt-1.5 text-xs font-medium text-rose-700" id={id + '-error'}>
+        <p className="field-error mt-1.5 text-xs font-medium" id={id + '-error'}>
           {error}
         </p>
       )}

@@ -74,9 +74,21 @@ export function AuthProvider({ children }) {
     setUser(null)
   }, [])
 
+  const updateProfile = useCallback(async (details) => {
+    const { data } = await apiClient.patch('/api/auth/me', {
+      name: details.name,
+      email: details.email,
+    })
+    if (!data?.user?.id || typeof data.user.name !== 'string' || typeof data.user.email !== 'string') {
+      throw new Error('The server returned an incomplete profile response.')
+    }
+    setUser(data.user)
+    return data.user
+  }, [])
+
   const value = useMemo(
-    () => ({ user, loading, login, register, logout }),
-    [user, loading, login, register, logout],
+    () => ({ user, loading, login, register, logout, updateProfile }),
+    [user, loading, login, register, logout, updateProfile],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

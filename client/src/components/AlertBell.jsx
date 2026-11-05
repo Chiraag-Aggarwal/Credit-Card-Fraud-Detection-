@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import apiClient from '../api/client'
+import { usePreferences } from '../context/PreferencesContext'
 
 export default function AlertBell() {
+  const { t } = usePreferences()
   const [count, setCount] = useState(0)
 
   useEffect(() => {
@@ -27,12 +29,12 @@ export default function AlertBell() {
   }, [])
 
   const label =
-    count > 0 ? 'Flagged transactions, ' + count + ' unread' : 'Flagged transactions'
+    count > 0 ? t('Flagged transactions, ' + count + ' unread', 'संदिग्ध लेनदेन, ' + count + ' अपठित') : t('Flagged transactions', 'संदिग्ध लेनदेन')
 
   return (
     <Link
       aria-label={label}
-      className="relative grid h-10 w-10 place-items-center rounded-lg text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+      className="icon-button"
       title={label}
       to="/flagged"
     >
@@ -52,7 +54,7 @@ export default function AlertBell() {
       {count > 0 && (
         <span
           aria-hidden="true"
-          className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white"
+          className="alert-count"
         >
           {count}
         </span>

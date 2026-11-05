@@ -1,124 +1,37 @@
-const riskClasses = {
-  LOW: 'bg-emerald-100 text-emerald-800',
-  MEDIUM: 'bg-amber-100 text-amber-900',
-  HIGH: 'bg-rose-100 text-rose-800',
-  UNSCORED: 'bg-slate-100 text-slate-700',
-}
-
-function formatTime(value) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? '—'
-    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
-}
-
-function formatAmount(amount, currency) {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency: String(currency || 'usd').toUpperCase(),
-    }).format(amount)
-  } catch {
-    return Number(amount || 0).toFixed(2) + ' ' + String(currency || 'usd').toUpperCase()
-  }
-}
-
-function formatProbability(value) {
-  if (value === null || value === undefined) return '—'
-  return new Intl.NumberFormat(undefined, {
-    style: 'percent',
-    maximumFractionDigits: 1,
-  }).format(value)
-}
-
-function formatSource(source) {
-  if (source === 'razorpay') return 'Razorpay'
-  if (source === 'stripe') return 'Stripe (legacy)'
-  return 'Simulated'
-}
+import RiskBadge from './RiskBadge'
+import { usePreferences } from '../context/PreferencesContext'
+import { formatTime, formatAmount, formatProbability, sourceText, statusText } from '../utils/transactionDisplay'
 
 export default function TransactionTable({ items, error, onRetry }) {
+  const { t, locale } = usePreferences()
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
-        <div>
-          <h2 className="text-base font-bold text-slate-950">Latest transactions</h2>
-          <p className="mt-1 text-xs text-slate-500">Newest 20 payments, refreshed every 5 seconds</p>
-        </div>
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-          {items.length} shown
-        </span>
+    <section className="ui-card recent-transactions min-w-0 overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-5">
+        <div><h2 className="text-lg font-bold">{t('Latest transactions', 'हाल के लेन-देन')}</h2><p className="text-muted mt-1 text-xs">{t('Newest 20 payments, refreshed every 5 seconds', 'नवीनतम 20 भुगतान, हर 5 सेकंड में अपडेट')}</p></div>
+        <span className="status-badge">{items.length} {t('shown', 'दिखाए गए')}</span>
       </div>
-
-      {error && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-5 py-3">
-          <p className="text-sm text-amber-900">{error}</p>
-          <button
-            className="text-sm font-semibold text-amber-900 underline underline-offset-2"
-            onClick={onRetry}
-            type="button"
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {items.length === 0 ? (
-        <div className="px-5 py-14 text-center">
-          <p className="text-sm font-semibold text-slate-900">
-            No transactions yet - click Simulate
-          </p>
-          <p className="mt-2 text-sm text-slate-500">
-            Simulate payments to populate this table with risk scores.
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-[900px] w-full border-collapse text-left text-sm">
-            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-              <tr>
-                <th className="px-5 py-3 font-semibold">Time</th>
-                <th className="px-5 py-3 font-semibold">Amount</th>
-                <th className="px-5 py-3 font-semibold">Probability</th>
-                <th className="px-5 py-3 font-semibold">Risk</th>
-                <th className="px-5 py-3 font-semibold">Source</th>
-                <th className="px-5 py-3 font-semibold">Scoring status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {items.map((transaction) => (
-                <tr className="hover:bg-slate-50/70" key={transaction.id}>
-                  <td className="whitespace-nowrap px-5 py-3.5 text-slate-600">
-                    {formatTime(transaction.createdAt)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-3.5 font-semibold text-slate-900">
-                    {formatAmount(transaction.displayAmount, transaction.currency)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-3.5 text-slate-600">
-                    {formatProbability(transaction.fraudProbability)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-3.5">
-                    <span
-                      className={
-                        'inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ' +
-                        (riskClasses[transaction.riskLabel] || riskClasses.UNSCORED)
-                      }
-                    >
-                      {transaction.riskLabel}
-                    </span>
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-3.5 text-slate-600">
-                    {formatSource(transaction.source)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-3.5 text-slate-600">
-                    {transaction.scoringStatus === 'pending_review' ? 'Pending review' : 'Scored'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
+      {error && <div className="notice notice-warning mx-5 mb-4 flex flex-wrap items-center justify-between gap-3" role="alert"><p className="text-sm">{error}</p><button className="ui-button" onClick={onRetry} type="button">{t('Retry', 'फिर कोशिश करें')}</button></div>}
+      {items.length === 0 ? <div className="px-5 py-14 text-center"><p className="font-semibold">{t('No transactions yet - click Simulate', 'अभी कोई लेन-देन नहीं — सिमुलेट करें पर क्लिक करें')}</p><p className="text-muted mt-2 text-sm">{t('Simulate payments to populate this table with risk scores.', 'जोखिम स्कोर के साथ नमूना भुगतान देखने के लिए सिमुलेट करें।')}</p></div> : <>
+        <div className="table-scroll hidden md:block" tabIndex={0} role="region" aria-label={t('Latest transactions table', 'हाल के लेन-देन की तालिका')}>
+          <table className="data-table w-full min-w-[760px] text-left text-sm">
+            <thead><tr>{[[ 'Time', 'समय'], ['Amount', 'राशि'], ['Probability', 'संभावना'], ['Risk', 'जोखिम'], ['Source', 'स्रोत'], ['Scoring status', 'स्कोर की स्थिति']].map(([en, hi]) => <th scope="col" key={en}>{t(en, hi)}</th>)}</tr></thead>
+            <tbody>{items.map((item) => <tr key={item.id}>
+              <td className="text-muted whitespace-nowrap">{formatTime(item.createdAt, locale)}</td>
+              <td className="whitespace-nowrap font-semibold">{formatAmount(item.displayAmount, item.currency, locale)}</td>
+              <td>{formatProbability(item.fraudProbability, locale)}</td>
+              <td><RiskBadge risk={item.riskLabel} /></td>
+              <td>{sourceText(item.source, t)}</td><td>{statusText(item.scoringStatus, t)}</td>
+            </tr>)}</tbody>
           </table>
         </div>
-      )}
+        <ul className="mobile-transaction-list space-y-3 px-4 pb-4 md:hidden">
+          {items.map((item) => <li className="transaction-mobile-card" key={item.id}>
+            <div className="flex items-start justify-between gap-3"><div><p className="text-lg font-bold">{formatAmount(item.displayAmount, item.currency, locale)}</p><p className="text-muted mt-1 text-xs">{formatTime(item.createdAt, locale)}</p></div><RiskBadge risk={item.riskLabel} /></div>
+            <dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-muted text-xs">{t('Fraud probability', 'धोखाधड़ी की संभावना')}</dt><dd className="mt-1 font-semibold">{formatProbability(item.fraudProbability, locale)}</dd></div><div><dt className="text-muted text-xs">{t('Source', 'स्रोत')}</dt><dd className="mt-1">{sourceText(item.source, t)}</dd></div></dl>
+            <p className="text-muted mt-3 text-xs">{statusText(item.scoringStatus, t)}</p>
+          </li>)}
+        </ul>
+      </>}
     </section>
   )
 }

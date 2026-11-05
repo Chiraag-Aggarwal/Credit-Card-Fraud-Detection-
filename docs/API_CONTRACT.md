@@ -102,6 +102,25 @@ Response:
 }
 ```
 
+#### `PATCH /api/auth/me` - token required
+
+Updates only the signed-in user's name and email. Both fields are required; names are trimmed and must be 1–120 characters. Email addresses must be valid, at most 254 characters, and are stored in lowercase. Unknown fields (including `id`, `role`, and `password`) are rejected with `422`.
+
+Request:
+
+```json
+{
+  "name": "Avery Merchant",
+  "email": "avery.new@example.com"
+}
+```
+
+Response status is `200`, with the same `{ "user": { "id", "name", "email", "role" } }` shape as `GET /api/auth/me`. The user ID and role do not change. The existing JWT remains valid because its subject is the user ID; subsequent login uses the new email and the existing password.
+
+An email already owned by another account returns `409` with `{ "error": { "message": "An account with this email already exists.", "code": "EMAIL_EXISTS" } }`. Missing or invalid authentication returns `401`. Updates are scoped to the authenticated user and never accept a target user ID from the request.
+
+In mock mode, demo profiles (never passwords) are saved in browser local storage, separately from real accounts. Stable mock user IDs keep profile edits available across refreshes. Restricted browser storage falls back to the current in-memory session. Mock registration/login remains a demonstration and accepts a password with 8 or more characters.
+
 ### Transactions
 
 #### `POST /api/predictions/batch` - token required
@@ -427,6 +446,12 @@ Fraud Detection Dashboard  |  Module A (ML + Backend) Page 6
 PROMPT T0.1 - Write the API contract file
 
 Response: `{user}`
+
+### PATCH /auth/me [auth: token]
+
+Request: `{name, email}` (both required; name 1–120 characters, valid email up to 254 characters). Unknown fields are rejected.
+
+Response: `{user}` with unchanged ID and role. Updates only the signed-in account. Duplicate email returns `409 EMAIL_EXISTS`; invalid input returns `422`. Existing JWTs remain valid; login then uses the new email.
 
 ### GET /transactions [auth: token]
 
