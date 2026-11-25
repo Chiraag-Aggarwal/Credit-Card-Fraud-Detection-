@@ -11,6 +11,7 @@ From `ml-service/`, run:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip==26.2
 python -m pip install -r requirements.txt
 python -m training.run_pipeline
 ```
@@ -33,6 +34,18 @@ Latest held-out results from the supplied dataset:
 `*` The Isolation Forest precision target could not be met on validation, so its threshold maximizes validation F1 instead. The XGBoost test confusion matrix is `[[56846, 17], [16, 83]]` (rows: actual genuine/fraud; columns: predicted genuine/fraud). Its threshold was selected on validation to meet a minimum precision of 0.80; the test split was kept separate. These results describe a randomized holdout of a historical dataset, not current real-world performance.
 
 The FastAPI app exposes `/health`, `/predict`, `/predict/batch`, `/explain`, and `/model-info`. The dashboard's batch analyzer accepts up to 100 CSV rows and does not persist them. The `/explain` route returns the five strongest TreeSHAP contributions for XGBoost, or exact coefficient contributions for logistic regression, in log-odds. Since V1–V28 are anonymized PCA components, an explanation describes model behavior, not a human-readable cause or proof of fraud.
+
+## Serve and verify
+
+Use Python 3.12 and the pinned requirements. From `ml-service/` run `uvicorn app.main:app --host 0.0.0.0 --port 8000` (add `--env-file .env` only if `python-dotenv` is installed, or set environment variables in your shell). Set `APP_ENV=production` and a non-empty `ML_API_KEY` in hosted environments. The API backend must use the same key in its `X-API-Key` header. Never expose that key in frontend `VITE_*` settings.
+
+`/health` is unauthenticated for hosting probes. It becomes ready only after the artifact loads and produces a finite, correctly shaped probability; it returns HTTP 503 when the model is not ready. All other routes require the configured key. Startup refuses incompatible scikit-learn pickle versions; keep the serialized model and its pinned runtime together. Predictions outside [0, 1], non-finite predictions, and invalid explanation values are rejected instead of returned to clients.
+
+Run `python -m pip install --upgrade pip==26.2`, then `python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1` and `python -m pytest tests -q`. This runs the full preparation/training unit suite, real artifact replay checks, and authenticated production prediction/explanation checks. The small unit-test datasets do not retrain or reevaluate the committed historical model, and replay ranking is not a new performance estimate.
+
+The root `render.yaml` uses two Python web services and one Vite static site, with a generated shared ML key and payments disabled. Supply the Neon PostgreSQL `DATABASE_URL` (including `sslmode=require`), actual frontend URL as API `CLIENT_URL`, actual ML URL as API `ML_SERVICE_URL`, and API URL as frontend `VITE_API_URL`. Rebuild the static site after changing its API URL. Free web services may sleep; the first request can wait for startup. No hosting resources are created merely by adding these files.
+
+For local containers, export `POSTGRES_PASSWORD` using URL-safe characters, `ML_API_KEY`, and a `JWT_SECRET` of at least 32 characters, then run `docker compose up --build` at the repository root. It starts PostgreSQL, migrates its schema, and waits for ML readiness before starting the API on `127.0.0.1:5000`. Run Vite separately with `VITE_USE_MOCK=false` and `VITE_API_URL=http://localhost:5000`. PostgreSQL data persists in the named volume. Docker execution must be verified on a machine with Docker installed; native tests do not validate container builds.
 
 ## Data limits
 

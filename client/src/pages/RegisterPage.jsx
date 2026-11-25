@@ -6,6 +6,7 @@ import Icon from '../components/Icon'
 import { getApiErrorMessage } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { usePreferences } from '../context/PreferencesContext'
+import { passwordValidation } from '../utils/passwordValidation'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -32,7 +33,8 @@ export default function RegisterPage() {
     if (!email) nextErrors.email = ['Enter your email address.', 'अपना ईमेल पता लिखें।']
     else if (!emailPattern.test(email)) nextErrors.email = ['Enter a valid email address.', 'सही ईमेल पता लिखें।']
     if (!form.password) nextErrors.password = ['Create a password.', 'पासवर्ड बनाएँ।']
-    else if (form.password.length < 8) nextErrors.password = ['Use at least 8 characters.', 'कम से कम 8 अक्षर या अंक लिखें।']
+    else if (passwordValidation(form.password) === 'too_short') nextErrors.password = ['Use at least 8 characters.', 'कम से कम 8 अक्षर या अंक लिखें।']
+    else if (passwordValidation(form.password) === 'too_long') nextErrors.password = ['Use a shorter password (maximum 72 UTF-8 bytes).', 'छोटा पासवर्ड लिखें (अधिकतम 72 UTF-8 बाइट)।']
     if (!form.confirmPassword) nextErrors.confirmPassword = ['Confirm your password.', 'पासवर्ड फिर से लिखें।']
     else if (form.confirmPassword !== form.password) nextErrors.confirmPassword = ['The passwords do not match.', 'दोनों पासवर्ड एक जैसे नहीं हैं।']
     setErrors(nextErrors)

@@ -1,4 +1,4 @@
-"""FastAPI backend for the fraud dashboard; MongoDB is the system of record."""
+"""FastAPI backend for the fraud dashboard, backed by PostgreSQL."""
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,14 +17,12 @@ import uuid
 
 import httpx
 import jwt
-from bson import ObjectId
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pymongo import MongoClient, ReturnDocument
-from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
+from starlette.concurrency import run_in_threadpool
 
 from app.schemas import (
     BatchInput,
@@ -38,6 +36,9 @@ from app.schemas import (
     TransactionFeatures,
 )
 from app.security import current_user, hash_password, issue_token, jwt_secret, public_user, verify_password
+from app.config import validate_settings
+from app.middleware import BodySizeLimit
+from app.storage import Repository, DuplicateRecordError
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -56,49 +57,24 @@ def fail(status: int, message: str, code: str) -> None:
     raise HTTPException(status_code=status, detail={"message": message, "code": code})
 
 
-def mongo_id(value: str) -> ObjectId:
-    if not ObjectId.is_valid(value):
-        fail(422, "Transaction id is invalid.", "VALIDATION_ERROR")
-    return ObjectId(value)
-
-
 def serialize_transaction(item: dict) -> dict:
     return {
         "id": str(item.get("_id", item.get("id"))),
         "createdAt": item["createdAt"].astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        "displayAmount": item["displayAmount"],
+        "displayAmount": float(item["displayAmount"]),
         "currency": item["currency"],
         "source": item["source"],
         "fraudProbability": item.get("fraudProbability"),
         "riskLabel": item.get("riskLabel", "UNSCORED"),
         "isFlagged": bool(item.get("isFlagged", False)),
         "scoringStatus": item.get("scoringStatus", "pending_review"),
+        "scoringReason": item.get("scoringReason"),
+        "paymentMode": item.get("paymentMode"),
         "modelVersion": item.get("modelVersion", ""),
         "reviewDecision": item.get("reviewDecision"),
         "stripePaymentIntentId": item.get("stripePaymentIntentId"),
         "razorpayPaymentId": item.get("razorpayPaymentId"),
     }
-
-
-def utc_bucket(value: datetime, unit: str) -> datetime:
-    value = value.astimezone(timezone.utc)
-    if unit == "hour":
-        return value.replace(minute=0, second=0, microsecond=0)
-    return value.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def build_series(rows: list[dict], start: datetime, count: int, unit: str) -> list[dict]:
-    lookup = {row["_id"].astimezone(timezone.utc): row for row in rows}
-    result = []
-    for offset in range(count):
-        timestamp = start + (timedelta(hours=offset) if unit == "hour" else timedelta(days=offset))
-        row = lookup.get(timestamp)
-        result.append({
-            "t": timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "total": row["total"] if row else 0,
-            "flagged": row["flagged"] if row else 0,
-        })
-    return result
 
 
 def ml_call(method: str, path: str, payload=None):
@@ -109,30 +85,33 @@ def ml_call(method: str, path: str, payload=None):
     if os.getenv("ML_API_KEY"):
         headers["X-API-Key"] = os.environ["ML_API_KEY"]
     timeout = float(os.getenv("ML_TIMEOUT_MS", "60000")) / 1000
-    last_error = None
-    for attempt in range(2):
-        try:
-            response = httpx.request(method, f"{base}{path}", json=payload, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
-        except (httpx.HTTPError, ValueError) as error:
-            last_error = error
-            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500:
-                break
-            if attempt:
-                break
-    raise RuntimeError("The ML service is unavailable.") from last_error
+    try:
+        response = httpx.request(method, f"{base}{path}", json=payload, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError) as error:
+        raise RuntimeError("The ML service is unavailable.") from error
 
 
 def score_transaction(features: dict) -> dict:
-    result = ml_call("POST", "/predict", features)
+    return validate_prediction(ml_call("POST", "/predict", features))
+
+
+def validate_prediction(result: dict) -> dict:
+    if not isinstance(result, dict):
+        raise RuntimeError("The ML service returned an invalid score.")
     probability = result.get("fraud_probability")
+    threshold = result.get("threshold")
     if (
-        not isinstance(probability, (int, float))
+        type(probability) not in (int, float)
         or not math.isfinite(probability)
         or not 0 <= probability <= 1
         or result.get("risk_label") not in {"LOW", "MEDIUM", "HIGH"}
         or not isinstance(result.get("is_fraud"), bool)
+        or type(threshold) not in (int, float)
+        or not math.isfinite(threshold)
+        or not 0 <= threshold <= 1
+        or not isinstance(result.get("model_version"), str)
     ):
         raise RuntimeError("The ML service returned an invalid score.")
     return result
@@ -145,8 +124,8 @@ def pick_sample(fraud: bool | None = None) -> dict:
     return random.choice(pool)
 
 
-def save_scored_transaction(request: Request, data: dict) -> dict:
-    features = data["features"]
+def save_scored_transaction(request: Request, data: dict, prediction_result=...) -> dict:
+    features = data.get("features")
     common = {
         "features": features,
         "displayAmount": float(data["displayAmount"]),
@@ -154,6 +133,7 @@ def save_scored_transaction(request: Request, data: dict) -> dict:
         "source": data["source"],
         "merchantId": data["merchantId"],
         "groundTruthLabel": data.get("groundTruthLabel"),
+        "paymentMode": data.get("paymentMode"),
         "createdAt": datetime.now(timezone.utc),
         "status": "captured" if data["source"] == "razorpay" else "simulated",
         **{
@@ -163,7 +143,9 @@ def save_scored_transaction(request: Request, data: dict) -> dict:
         },
     }
     try:
-        prediction = score_transaction(features)
+        if not features:
+            raise ValueError("This payment has no compatible model features.")
+        prediction = score_transaction(features) if prediction_result is ... else validate_prediction(prediction_result)
         record = {
             **common,
             "fraudProbability": float(prediction["fraud_probability"]),
@@ -171,9 +153,10 @@ def save_scored_transaction(request: Request, data: dict) -> dict:
             "isFlagged": prediction["is_fraud"],
             "scoringStatus": "scored",
             "modelVersion": prediction.get("model_version", ""),
+            "scoringReason": None,
         }
     except Exception as error:
-        logger.warning("ML scoring unavailable; sending transaction for manual review (%s).", type(error).__name__)
+        logger.info("Sending transaction for manual review (%s).", type(error).__name__)
         record = {
             **common,
             "fraudProbability": None,
@@ -181,12 +164,16 @@ def save_scored_transaction(request: Request, data: dict) -> dict:
             "isFlagged": True,
             "scoringStatus": "pending_review",
             "modelVersion": "",
+            "scoringReason": "unsupported_payment_features" if not features else "model_unavailable",
         }
     try:
-        result = request.app.state.db.transactions.insert_one(record)
-        record["_id"] = result.inserted_id
-    except DuplicateKeyError:
-        record = request.app.state.db.transactions.find_one({"razorpayPaymentId": data.get("razorpayPaymentId")})
+        record = request.app.state.db.create_transaction(record)
+    except DuplicateRecordError:
+        if not data.get("razorpayPaymentId"):
+            raise
+        record = request.app.state.db.get_transaction_by_payment(data["razorpayPaymentId"])
+        if not record:
+            raise
     if record and (record["riskLabel"] == "HIGH" or record["scoringStatus"] == "pending_review"):
         logger.warning("Fraud alert for merchant %s: transaction %s requires attention.", data["merchantId"], record["_id"])
     return record
@@ -203,26 +190,26 @@ def resolve_captured_payment(request: Request, payment: dict, event_id: str | No
     payment_id = payment.get("id")
     if not order_id or not payment_id:
         return None
-    existing = request.app.state.db.transactions.find_one({"razorpayPaymentId": payment_id})
-    if existing:
-        return existing
-    checkout = request.app.state.db.payment_checkouts.find_one({"razorpayOrderId": order_id})
+    checkout = request.app.state.db.get_checkout(order_id)
     if not checkout or payment.get("status") != "captured":
         return None
     amount = payment.get("amount")
     currency = str(payment.get("currency", "")).lower()
-    if amount != checkout["amountPaise"] or currency != checkout["currency"]:
+    if type(amount) is not int or amount != checkout["amountPaise"] or currency != checkout["currency"]:
         logger.error("Razorpay payment amount or currency did not match its order.")
         return None
-    sample = pick_sample(fraud=checkout["mode"] == "fraud-demo" if checkout["mode"] == "fraud-demo" else None)
-    features = {key: float(value) for key, value in sample.items() if key != "Class"}
+    existing = request.app.state.db.get_transaction_by_payment(payment_id)
+    if existing:
+        return existing if existing.get("razorpayOrderId") == order_id else None
+    # Provider metadata cannot supply the historical dataset's anonymous PCA
+    # features. Never attach another cardholder's sample score to this payment.
     return save_scored_transaction(request, {
-        "features": features,
+        "features": None,
         "displayAmount": amount / 100,
         "currency": currency,
         "source": "razorpay",
         "merchantId": checkout["merchantId"],
-        "groundTruthLabel": sample.get("Class"),
+        "paymentMode": checkout.get("paymentMode"),
         "razorpayOrderId": order_id,
         "razorpayPaymentId": payment_id,
         "razorpayEventId": event_id,
@@ -231,30 +218,22 @@ def resolve_captured_payment(request: Request, payment: dict, event_id: str | No
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    uri = os.getenv("MONGODB_URI", "").strip()
-    if not uri:
-        raise RuntimeError("MONGODB_URI must be configured before starting the API.")
-    jwt_secret()
-    client = MongoClient(uri, serverSelectionTimeoutMS=10000, tz_aware=True)
-    client.admin.command("ping")
-    database_name = os.getenv("MONGODB_DATABASE")
-    database = client[database_name] if database_name else client.get_default_database()
-    if database is None:
-        client.close()
-        raise RuntimeError("MONGODB_URI must include a database name or set MONGODB_DATABASE.")
-    application.state.mongo = client
-    application.state.db = database
-    database.users.create_index("email", unique=True)
-    database.transactions.create_index([("merchantId", 1), ("createdAt", -1)])
-    database.transactions.create_index("razorpayPaymentId", unique=True, sparse=True)
-    database.payment_checkouts.create_index("razorpayOrderId", unique=True)
-    database.payment_checkouts.create_index("expiresAt", expireAfterSeconds=0)
-    logger.info("Python API connected to MongoDB database %s", database.name)
-    yield
-    client.close()
+    validate_settings()
+    database = Repository(os.environ["DATABASE_URL"])
+    try:
+        await run_in_threadpool(database.ping)
+        await run_in_threadpool(database.check_schema)
+        application.state.db = database
+        logger.info("Python API connected to PostgreSQL.")
+        yield
+    finally:
+        database.close()
+        if hasattr(application.state, "db"):
+            del application.state.db
 
 
-app = FastAPI(title="Fraud Detection API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Fraud Detection API", version="3.0.0", lifespan=lifespan)
+app.add_middleware(BodySizeLimit)
 client_origin = os.getenv("CLIENT_URL", "http://localhost:5173").rstrip("/")
 app.add_middleware(
     CORSMiddleware,
@@ -285,14 +264,18 @@ async def generic_error_handler(_request: Request, error: Exception):
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    if request.url.path.startswith("/api/") and request.method != "OPTIONS":
+    if request.url.path.startswith("/api/") and request.method != "OPTIONS" and not request.url.path.startswith("/api/webhooks/"):
         now = time.monotonic()
         client_ip = request.client.host if request.client else "unknown"
-        limits = [("api", 600, 15 * 60)]
+        limits = [("api", 1200, 15 * 60)]
         if request.url.path in {"/api/auth/login", "/api/auth/register"}:
             limits.append(("auth", 10, 15 * 60))
         if request.url.path == "/api/transactions/simulate":
             limits.append(("simulate", 10, 15 * 60))
+        if request.url.path == "/api/predictions/batch":
+            limits.append(("batch", 20, 15 * 60))
+        if request.url.path == "/api/payments/checkout-session":
+            limits.append(("checkout", 20, 15 * 60))
         retry_after = None
         with _rate_limit_lock:
             for bucket, limit, window_seconds in limits:
@@ -329,13 +312,17 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
 @app.get("/health")
 def health(request: Request):
-    database_ready = hasattr(request.app.state, "db")
-    return {"status": "ok" if database_ready else "starting", "database": database_ready}
+    try:
+        request.app.state.db.ping()
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "database": False})
+    return {"status": "ok", "database": True}
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -348,16 +335,15 @@ def register(body: RegisterInput, request: Request):
         "createdAt": datetime.now(timezone.utc),
     }
     try:
-        result = request.app.state.db.users.insert_one(user)
-    except DuplicateKeyError:
+        user = request.app.state.db.create_user(user)
+    except DuplicateRecordError:
         fail(409, "An account with this email already exists.", "EMAIL_EXISTS")
-    user["_id"] = result.inserted_id
-    return {"token": issue_token(str(result.inserted_id), user["role"]), "user": public_user(user)}
+    return {"token": issue_token(str(user["_id"]), user["role"]), "user": public_user(user)}
 
 
 @app.post("/api/auth/login")
 def login(body: LoginInput, request: Request):
-    user = request.app.state.db.users.find_one({"email": str(body.email).lower()})
+    user = request.app.state.db.get_user_by_email(str(body.email).lower())
     if not user or not verify_password(body.password, user.get("passwordHash", "")):
         fail(401, "Email or password is incorrect.", "INVALID_CREDENTIALS")
     return {"token": issue_token(str(user["_id"]), user.get("role", "merchant")), "user": public_user(user)}
@@ -371,12 +357,10 @@ def me(user: dict = Depends(current_user)):
 @app.patch("/api/auth/me")
 def update_profile(body: ProfileInput, request: Request, user: dict = Depends(current_user)):
     try:
-        updated = request.app.state.db.users.find_one_and_update(
-            {"_id": user["_id"]},
-            {"$set": {"name": body.name, "email": str(body.email).lower()}},
-            return_document=ReturnDocument.AFTER,
+        updated = request.app.state.db.update_user(
+            user["_id"], name=body.name, email=str(body.email).lower(),
         )
-    except DuplicateKeyError:
+    except DuplicateRecordError:
         fail(409, "An account with this email already exists.", "EMAIL_EXISTS")
     if not updated:
         fail(401, "User account was not found.", "UNAUTHORIZED")
@@ -392,6 +376,7 @@ def batch_predictions(body: BatchInput, _user: dict = Depends(current_user)):
             raise RuntimeError("ML response did not match the submitted batch.")
         items = []
         for index, result in enumerate(results):
+            validate_prediction(result)
             probability = float(result["fraud_probability"])
             if not math.isfinite(probability) or not 0 <= probability <= 1:
                 raise RuntimeError("ML service returned an invalid prediction.")
@@ -420,11 +405,6 @@ def list_transactions(
     to_date: str | None = Query(None, alias="to"),
     user: dict = Depends(current_user),
 ):
-    filters: dict = {"merchantId": user["_id"]}
-    if riskLabel:
-        filters["riskLabel"] = riskLabel
-    if flagged is not None:
-        filters["isFlagged"] = flagged
     created = {}
     for supplied, operator in ((from_date, "$gte"), (to_date, "$lte")):
         if supplied:
@@ -437,74 +417,36 @@ def list_transactions(
                 fail(422, "Date filters must be ISO date-time strings.", "VALIDATION_ERROR")
     if "$gte" in created and "$lte" in created and created["$gte"] > created["$lte"]:
         fail(422, "The from date must be before the to date.", "VALIDATION_ERROR")
-    if created:
-        filters["createdAt"] = created
-    collection = request.app.state.db.transactions
-    total = collection.count_documents(filters)
-    documents = collection.find(filters).sort("createdAt", -1).skip((page - 1) * limit).limit(limit)
+    documents, total = request.app.state.db.list_transactions(
+        user["_id"], page=page, limit=limit, risk_label=riskLabel, flagged=flagged,
+        from_date=created.get("$gte"), to_date=created.get("$lte"),
+    )
     return {"items": [serialize_transaction(item) for item in documents], "page": page, "limit": limit, "total": total}
 
 
 @app.get("/api/transactions/stats")
 def transaction_stats(request: Request, user: dict = Depends(current_user)):
-    collection = request.app.state.db.transactions
-    merchant = {"merchantId": user["_id"]}
-    summary_rows = list(collection.aggregate([
-        {"$match": merchant},
-        {"$group": {
-            "_id": None,
-            "total": {"$sum": 1},
-            "flagged": {"$sum": {"$cond": ["$isFlagged", 1, 0]}},
-            "avgProbability": {"$avg": "$fraudProbability"},
-            **{label: {"$sum": {"$cond": [{"$eq": ["$riskLabel", label]}, 1, 0]}} for label in RISK_LABELS},
-        }},
-    ]))
-    summary = summary_rows[0] if summary_rows else {}
-    now = datetime.now(timezone.utc)
-    hourly_start = utc_bucket(now, "hour") - timedelta(hours=23)
-    daily_start = utc_bucket(now, "day") - timedelta(days=29)
-    def series(start: datetime, unit: str, count: int):
-        rows = list(collection.aggregate([
-            {"$match": {**merchant, "createdAt": {"$gte": start}}},
-            {"$group": {
-                "_id": {"$dateTrunc": {"date": "$createdAt", "unit": unit, "timezone": "UTC"}},
-                "total": {"$sum": 1},
-                "flagged": {"$sum": {"$cond": ["$isFlagged", 1, 0]}},
-            }},
-            {"$sort": {"_id": 1}},
-        ]))
-        return build_series(rows, start, count, unit)
-    total = int(summary.get("total", 0))
-    flagged_count = int(summary.get("flagged", 0))
-    return {
-        "total": total,
-        "flagged": flagged_count,
-        "fraudRate": flagged_count / total if total else 0,
-        "avgProbability": summary.get("avgProbability") or 0,
-        "byRisk": {label: int(summary.get(label, 0)) for label in RISK_LABELS},
-        "series24h": series(hourly_start, "hour", 24),
-        "series30d": series(daily_start, "day", 30),
-    }
+    return request.app.state.db.transaction_stats(user["_id"])
 
 
 @app.get("/api/transactions/score-histogram")
 def score_histogram(request: Request, user: dict = Depends(current_user)):
-    counts = [0] * 10
-    for probability in request.app.state.db.transactions.find(
-        {"merchantId": user["_id"], "fraudProbability": {"$ne": None}},
-        {"fraudProbability": 1},
-    ):
-        index = min(9, int(float(probability["fraudProbability"]) * 10))
-        counts[index] += 1
-    return {"bins": [{"from": index / 10, "to": (index + 1) / 10, "count": counts[index]} for index in range(10)]}
+    return request.app.state.db.score_histogram(user["_id"])
 
 
 @app.post("/api/transactions/simulate", status_code=201)
 def simulate(body: SimulateInput, request: Request, user: dict = Depends(current_user)):
+    samples = [pick_sample(fraud=True if body.mode == "fraud" else None) for _ in range(body.count)]
+    features_batch = [{key: float(value) for key, value in sample.items() if key != "Class"} for sample in samples]
+    try:
+        predictions = ml_call("POST", "/predict/batch", features_batch)
+        if not isinstance(predictions, list) or len(predictions) != body.count:
+            raise RuntimeError("Batch size mismatch.")
+    except Exception as error:
+        logger.warning("Simulation scoring unavailable (%s).", type(error).__name__)
+        predictions = [None] * body.count
     created = []
-    for _ in range(body.count):
-        sample = pick_sample(fraud=True if body.mode == "fraud" else None)
-        features = {key: float(value) for key, value in sample.items() if key != "Class"}
+    for sample, features, prediction in zip(samples, features_batch, predictions, strict=True):
         created.append(save_scored_transaction(request, {
             "features": features,
             "displayAmount": features["Amount"],
@@ -512,17 +454,13 @@ def simulate(body: SimulateInput, request: Request, user: dict = Depends(current
             "source": "simulated",
             "merchantId": user["_id"],
             "groundTruthLabel": sample.get("Class"),
-        }))
+        }, prediction_result=prediction))
     return {"created": len(created), "items": [serialize_transaction(item) for item in created]}
 
 
 @app.patch("/api/transactions/{transaction_id}/review")
 def review(transaction_id: str, body: ReviewInput, request: Request, user: dict = Depends(current_user)):
-    updated = request.app.state.db.transactions.find_one_and_update(
-        {"_id": mongo_id(transaction_id), "merchantId": user["_id"]},
-        {"$set": {"reviewDecision": body.decision}},
-        return_document=ReturnDocument.AFTER,
-    )
+    updated = request.app.state.db.review_transaction(transaction_id, user["_id"], body.decision)
     if not updated:
         fail(404, "Transaction was not found.", "NOT_FOUND")
     return serialize_transaction(updated)
@@ -530,7 +468,7 @@ def review(transaction_id: str, body: ReviewInput, request: Request, user: dict 
 
 @app.get("/api/transactions/{transaction_id}/explanation")
 def explanation(transaction_id: str, request: Request, user: dict = Depends(current_user)):
-    item = request.app.state.db.transactions.find_one({"_id": mongo_id(transaction_id), "merchantId": user["_id"]})
+    item = request.app.state.db.get_transaction(transaction_id, user["_id"])
     if not item:
         fail(404, "Transaction was not found.", "NOT_FOUND")
     if item.get("scoringStatus") != "scored" or not item.get("features"):
@@ -560,25 +498,44 @@ def model_info(_user: dict = Depends(current_user)):
 
 @app.get("/api/alerts/unread-count")
 def unread_count(request: Request, user: dict = Depends(current_user)):
-    count = request.app.state.db.transactions.count_documents({
-        "merchantId": user["_id"],
-        "isFlagged": True,
-        "reviewDecision": None,
-    })
+    count = request.app.state.db.unread_count(user["_id"])
     return {"count": count}
+
+
+def payment_status() -> dict:
+    key_id = os.getenv("RAZORPAY_KEY_ID", "").strip()
+    secret = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+    reason = None
+    mode = "disabled"
+    if os.getenv("PAYMENTS_ENABLED", "false").lower() != "true":
+        reason = "Payments are not enabled. Account activation and payment keys are required."
+    elif not key_id or not secret or "replace_me" in key_id:
+        reason = "Razorpay credentials have not been configured."
+    elif key_id.startswith("rzp_test_"):
+        mode = "test"
+    elif key_id.startswith("rzp_live_") and os.getenv("ALLOW_LIVE_PAYMENTS", "false").lower() == "true":
+        mode = "live"
+    else:
+        reason = "Live payments are disabled or the Razorpay key is invalid."
+    return {"provider": "razorpay", "mode": mode, "enabled": mode != "disabled", "reason": reason}
+
+
+@app.get("/api/payments/status")
+def get_payment_status(_user: dict = Depends(current_user)):
+    return payment_status()
 
 
 @app.post("/api/payments/checkout-session")
 def checkout_session(body: CheckoutInput, request: Request, user: dict = Depends(current_user)):
+    availability = payment_status()
+    if not availability["enabled"]:
+        fail(503, availability["reason"], "PAYMENTS_UNAVAILABLE")
     key_id = os.getenv("RAZORPAY_KEY_ID", "").strip()
     key_secret = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
-    allow_live = os.getenv("ALLOW_LIVE_PAYMENTS", "false").lower() == "true"
-    if not key_id or not key_secret:
-        fail(503, "Razorpay test credentials are not configured.", "PAYMENTS_UNAVAILABLE")
-    if not key_id.startswith("rzp_test_") and not allow_live:
-        fail(503, "Live payment credentials are disabled for this demo.", "LIVE_PAYMENTS_DISABLED")
+    if body.mode != "normal":
+        fail(422, "Use Simulate fraud burst to analyse historical fraud samples. Payments cannot be assigned a demo fraud score.", "VALIDATION_ERROR")
     if body.currency != "inr":
-        fail(422, "This Razorpay demo checkout accepts INR only.", "VALIDATION_ERROR")
+        fail(422, "This checkout accepts INR only.", "VALIDATION_ERROR")
     amount_paise = round(body.amount * 100)
     if not math.isclose(body.amount * 100, amount_paise, rel_tol=0, abs_tol=1e-7):
         fail(422, "Amount must have no more than two decimal places.", "VALIDATION_ERROR")
@@ -599,17 +556,19 @@ def checkout_session(body: CheckoutInput, request: Request, user: dict = Depends
     except (httpx.HTTPError, ValueError) as error:
         logger.warning("Razorpay order creation failed (%s).", type(error).__name__)
         fail(502, "Razorpay could not create a checkout order.", "PAYMENT_PROVIDER_ERROR")
-    order_id = order.get("id")
-    if not order_id:
+    order_id = order.get("id") if isinstance(order, dict) else None
+    if (not isinstance(order_id, str) or not order_id.startswith("order_")
+            or order.get("amount") != amount_paise or order.get("currency") != "INR"):
         fail(502, "Razorpay returned an invalid order.", "PAYMENT_PROVIDER_ERROR")
     now = datetime.now(timezone.utc)
     session_expires = now + timedelta(minutes=20)
-    request.app.state.db.payment_checkouts.insert_one({
+    request.app.state.db.create_checkout({
         "razorpayOrderId": order_id,
         "merchantId": user["_id"],
         "amountPaise": amount_paise,
         "currency": "inr",
         "mode": body.mode,
+        "paymentMode": availability["mode"],
         # Retain an order long enough for delayed provider webhook retries.
         "expiresAt": now + timedelta(days=90),
         "createdAt": now,
@@ -617,6 +576,9 @@ def checkout_session(body: CheckoutInput, request: Request, user: dict = Depends
     checkout_token = jwt.encode({
         "sub": str(user["_id"]),
         "type": "checkout",
+        "aud": "fraud-checkout",
+        "iss": "fraud-api",
+        "iat": now,
         "order_id": order_id,
         "amount": amount_paise,
         "currency": "inr",
@@ -628,6 +590,7 @@ def checkout_session(body: CheckoutInput, request: Request, user: dict = Depends
         "amount": amount_paise,
         "currency": "INR",
         "session_token": checkout_token,
+        "mode": availability["mode"],
     })
     return {"url": f"{os.getenv('CLIENT_URL', 'http://localhost:5173').rstrip('/')}/checkout?{query}"}
 
@@ -635,16 +598,16 @@ def checkout_session(body: CheckoutInput, request: Request, user: dict = Depends
 @app.post("/api/payments/verify")
 def verify_payment(body: PaymentVerification, request: Request):
     try:
-        session = jwt.decode(body.sessionToken, jwt_secret(), algorithms=["HS256"])
+        session = jwt.decode(
+            body.sessionToken, jwt_secret(), algorithms=["HS256"], audience="fraud-checkout",
+            issuer="fraud-api", options={"require": ["exp", "iat", "sub", "type", "order_id", "amount", "currency"]},
+        )
     except jwt.PyJWTError:
         fail(401, "Checkout session is invalid or expired.", "INVALID_CHECKOUT_SESSION")
     order_id = body.razorpay_order_id
     if session.get("type") != "checkout" or session.get("order_id") != order_id:
         fail(401, "Payment does not match the checkout session.", "INVALID_CHECKOUT_SESSION")
-    checkout = request.app.state.db.payment_checkouts.find_one({
-        "razorpayOrderId": order_id,
-        "merchantId": ObjectId(session["sub"]),
-    })
+    checkout = request.app.state.db.get_checkout(order_id, merchant_id=session["sub"])
     if not checkout or checkout["expiresAt"] < datetime.now(timezone.utc):
         fail(410, "Checkout session has expired. Start a new payment.", "CHECKOUT_EXPIRED")
     if session.get("amount") != checkout["amountPaise"] or session.get("currency") != checkout["currency"]:
@@ -662,7 +625,7 @@ def verify_payment(body: PaymentVerification, request: Request):
     except (httpx.HTTPError, ValueError) as error:
         logger.warning("Razorpay payment verification fetch failed (%s).", type(error).__name__)
         fail(502, "Could not confirm payment status with Razorpay.", "PAYMENT_PROVIDER_ERROR")
-    if payment.get("order_id") != order_id:
+    if not isinstance(payment, dict) or payment.get("id") != body.razorpay_payment_id or payment.get("order_id") != order_id:
         fail(400, "Razorpay payment does not belong to this order.", "INVALID_PAYMENT")
     if payment.get("status") != "captured":
         fail(409, "Razorpay has not marked this payment captured yet.", "PAYMENT_NOT_CAPTURED")
@@ -678,26 +641,48 @@ async def razorpay_webhook(request: Request, signature: str | None = Header(defa
     if not secret:
         fail(503, "Razorpay webhook secret is not configured.", "WEBHOOK_UNAVAILABLE")
     raw_body = await request.body()
+    if len(raw_body) > 256_000:
+        fail(413, "Webhook body is too large.", "PAYLOAD_TOO_LARGE")
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
-    if not signature or not hmac.compare_digest(expected, signature):
+    if not signature or not hmac.compare_digest(expected.encode(), signature.encode()):
         fail(400, "Razorpay webhook signature is invalid.", "INVALID_WEBHOOK_SIGNATURE")
     try:
         event = json.loads(raw_body)
     except json.JSONDecodeError:
         fail(400, "Razorpay webhook body is invalid.", "INVALID_WEBHOOK")
+    if not isinstance(event, dict):
+        fail(400, "Razorpay webhook body must be an object.", "INVALID_WEBHOOK")
     if event.get("event") != "payment.captured":
         return {"received": True}
-    payment = event.get("payload", {}).get("payment", {}).get("entity", {})
-    if not payment.get("id") or not payment.get("order_id"):
-        fail(400, "Razorpay webhook payment payload is invalid.", "INVALID_WEBHOOK")
-    event_id = request.headers.get("x-razorpay-event-id")
-    existing = request.app.state.db.transactions.find_one({"razorpayPaymentId": payment["id"]})
-    if existing:
-        return {"received": True}
     try:
-        resolve_captured_payment(request, payment, event_id)
-    except DuplicateKeyError:
-        return {"received": True}
+        payment = event["payload"]["payment"]["entity"]
+    except (KeyError, TypeError):
+        fail(400, "Razorpay webhook payment payload is invalid.", "INVALID_WEBHOOK")
+    if not isinstance(payment, dict) or not isinstance(payment.get("id"), str) or not isinstance(payment.get("order_id"), str):
+        fail(400, "Razorpay webhook payment payload is invalid.", "INVALID_WEBHOOK")
+    digest = hashlib.sha256(raw_body).hexdigest()
+    event_id = request.headers.get("x-razorpay-event-id") or digest
+    if len(event_id) > 255 or not payment["id"] or not payment["order_id"]:
+        fail(400, "Razorpay webhook identifiers are invalid.", "INVALID_WEBHOOK")
+    try:
+        receipt = await run_in_threadpool(
+            request.app.state.db.record_webhook, event_id, event["event"], digest, payment_id=payment["id"],
+        )
+        if receipt["payloadDigest"] != digest:
+            fail(409, "Webhook identifier was already used for a different payload.", "WEBHOOK_CONFLICT")
+        if receipt["status"] == "completed":
+            return {"received": True}
+        saved = await run_in_threadpool(resolve_captured_payment, request, payment, event_id)
+        if not saved:
+            # Non-2xx causes provider retries. Do not silently acknowledge a
+            # payment that has not been matched and durably recorded.
+            fail(503, "Payment could not yet be matched to its stored order.", "PAYMENT_RECONCILIATION_REQUIRED")
+        await run_in_threadpool(request.app.state.db.complete_webhook, event_id, transaction_id=saved["_id"])
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.error("Payment webhook persistence failed (%s).", type(error).__name__)
+        fail(503, "Payment notification could not be saved. Please retry.", "WEBHOOK_RETRY")
     return {"received": True}
 
 

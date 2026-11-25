@@ -1,23 +1,29 @@
 import axios from 'axios'
-import mockApiAdapter from '../mocks/mockApi'
 import { formatApiError } from '../utils/apiErrors'
+import { createAuthSessionStore, shouldExpireSession, usesAccountSession } from '../utils/authSession'
 
-export const TOKEN_STORAGE_KEY = 'fraud-dashboard-token'
+export const isMockMode = import.meta.env.VITE_USE_MOCK === 'true'
+export const authSession = createAuthSessionStore(isMockMode)
 
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '',
+  baseURL: isMockMode ? '' : (import.meta.env.VITE_API_URL || '').trim(),
+  timeout: 90000,
 })
 
-if (import.meta.env.VITE_USE_MOCK === 'true') {
-  apiClient.defaults.adapter = mockApiAdapter
+if (isMockMode) {
+  apiClient.defaults.adapter = async (config) => {
+    const { default: mockApiAdapter } = await import('../mocks/mockApi')
+    return mockApiAdapter(config)
+  }
 }
 
 apiClient.interceptors.request.use((config) => {
-  const token = localStorage.getItem(TOKEN_STORAGE_KEY)
+  const token = usesAccountSession(config) ? authSession.get() : null
 
   if (token) {
     config.headers = config.headers || {}
     config.headers.Authorization = 'Bearer ' + token
+    config.accountSessionToken = token
   }
 
   return config
@@ -26,8 +32,8 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem(TOKEN_STORAGE_KEY)
+    if (shouldExpireSession(error, authSession.get())) {
+      authSession.clear()
 
       if (window.location.pathname !== '/login') {
         window.location.assign('/login')

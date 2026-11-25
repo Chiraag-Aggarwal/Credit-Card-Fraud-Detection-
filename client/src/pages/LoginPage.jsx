@@ -6,6 +6,7 @@ import Icon from '../components/Icon'
 import { getApiErrorMessage } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { usePreferences } from '../context/PreferencesContext'
+import { passwordValidation } from '../utils/passwordValidation'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -32,6 +33,7 @@ export default function LoginPage() {
     if (!email) nextErrors.email = ['Enter your email address.', 'अपना ईमेल पता लिखें।']
     else if (!emailPattern.test(email)) nextErrors.email = ['Enter a valid email address.', 'सही ईमेल पता लिखें।']
     if (!form.password) nextErrors.password = ['Enter your password.', 'अपना पासवर्ड लिखें।']
+    else if (passwordValidation(form.password) === 'too_long') nextErrors.password = ['Use a shorter password (maximum 72 UTF-8 bytes).', 'छोटा पासवर्ड लिखें (अधिकतम 72 UTF-8 बाइट)।']
     setErrors(nextErrors)
     return Object.keys(nextErrors).length === 0
   }

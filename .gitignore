@@ -2,6 +2,13 @@ node_modules
 venv
 .venv
 .env
+.env.*
+!.env.example
+*.dump
+*.backup
+.pytest_cache/
+.coverage
+coverage/
 __pycache__
 dist
 data/creditcard.csv

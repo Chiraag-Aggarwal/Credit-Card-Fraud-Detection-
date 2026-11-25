@@ -2,18 +2,31 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, FiniteFloat, field_
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name", "email", "currency", mode="before", check_fields=False)
+    @classmethod
+    def trim_public_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("password", check_fields=False)
+    @classmethod
+    def valid_password_bytes(cls, value: str) -> str:
+        # bcrypt must never silently truncate two different passwords to one hash.
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes.")
+        return value
 
 
 class RegisterInput(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr = Field(max_length=254)
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=8, max_length=72)
 
 
 class LoginInput(StrictModel):
     email: EmailStr = Field(max_length=254)
-    password: str = Field(min_length=1)
+    password: str = Field(min_length=1, max_length=72)
 
 
 class ProfileInput(StrictModel):
@@ -106,7 +119,7 @@ class CheckoutInput(StrictModel):
 
 
 class PaymentVerification(StrictModel):
-    sessionToken: str = Field(min_length=1)
-    razorpay_payment_id: str = Field(min_length=1)
-    razorpay_order_id: str = Field(min_length=1)
-    razorpay_signature: str = Field(min_length=1)
+    sessionToken: str = Field(min_length=1, max_length=2048)
+    razorpay_payment_id: str = Field(pattern=r"^pay_[A-Za-z0-9]+$", max_length=100)
+    razorpay_order_id: str = Field(pattern=r"^order_[A-Za-z0-9]+$", max_length=100)
+    razorpay_signature: str = Field(pattern=r"^[a-fA-F0-9]{64}$")

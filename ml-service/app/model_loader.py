@@ -1,14 +1,38 @@
 import json
 from pathlib import Path
 from typing import Any
+import warnings
 
 import joblib
+import numpy as np
+import pandas as pd
+from pydantic import ValidationError
+from sklearn.exceptions import InconsistentVersionWarning
+
+from app.schemas import ModelInfoResponse
 
 
 ARTIFACTS_DIR = Path(__file__).resolve().parents[1] / "artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "model.joblib"
 THRESHOLD_PATH = ARTIFACTS_DIR / "threshold.json"
 METRICS_PATH = ARTIFACTS_DIR / "metrics.json"
+FEATURE_COLUMNS = ["Time", *[f"V{i}" for i in range(1, 29)], "Amount"]
+
+
+def predict_probabilities(model: Any, rows: pd.DataFrame) -> np.ndarray:
+    """Reject broken or incompatible model outputs before they reach API clients."""
+    if not np.array_equal(getattr(model, "classes_", None), [0, 1]):
+        raise RuntimeError("Model classes must be ordered as genuine (0), fraud (1).")
+    probabilities = np.asarray(model.predict_proba(rows), dtype=float)
+    if (
+        probabilities.shape != (len(rows), 2)
+        or not np.isfinite(probabilities).all()
+        or (probabilities < 0).any()
+        or (probabilities > 1).any()
+        or not np.allclose(probabilities.sum(axis=1), 1, atol=1e-6)
+    ):
+        raise RuntimeError("Model returned invalid class probabilities.")
+    return probabilities[:, 1]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -28,7 +52,11 @@ def load_model_artifacts() -> tuple[Any, float, dict[str, Any], str, dict[str, A
     if not MODEL_PATH.is_file():
         raise FileNotFoundError(f"Required model artifact is missing: {MODEL_PATH}")
     try:
-        model = joblib.load(MODEL_PATH)
+        # Serialized estimators are not portable across arbitrary sklearn releases.
+        # Fail at startup instead of silently serving predictions after a mismatch.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", InconsistentVersionWarning)
+            model = joblib.load(MODEL_PATH)
     except Exception as error:
         raise RuntimeError(f"Could not load model artifact {MODEL_PATH}: {error}") from error
 
@@ -70,4 +98,20 @@ def load_model_artifacts() -> tuple[Any, float, dict[str, Any], str, dict[str, A
             f"Artifact {METRICS_PATH} is missing required fields: "
             f"{', '.join(missing_metrics)}"
         )
+    try:
+        ModelInfoResponse(
+            model_version=model_version,
+            threshold=threshold,
+            min_precision=min_precision,
+            trained_at=metrics["trained_at"],
+            metrics={name: metrics[name] for name in required_metrics if name != "trained_at"},
+        )
+    except ValidationError as error:
+        raise RuntimeError("Model metadata contains invalid metric values.") from error
+    try:
+        # One prediction also detects estimator/runtime incompatibilities that do not
+        # emit a pickle-version warning. It is a readiness check, not an evaluation.
+        predict_probabilities(model, pd.DataFrame([[0.0] * 30], columns=FEATURE_COLUMNS))
+    except Exception as error:
+        raise RuntimeError("Loaded model failed its prediction readiness check.") from error
     return model, float(threshold), metrics, model_version, threshold_data

@@ -6,7 +6,7 @@ import {
   useMemo,
   useState,
 } from 'react'
-import apiClient, { TOKEN_STORAGE_KEY } from '../api/client'
+import apiClient, { authSession } from '../api/client'
 
 const AuthContext = createContext(null)
 
@@ -15,7 +15,7 @@ function saveSession(data, setUser) {
     throw new Error('The server returned an incomplete sign-in response.')
   }
 
-  localStorage.setItem(TOKEN_STORAGE_KEY, data.token)
+  authSession.set(data.token)
   setUser(data.user)
   return data.user
 }
@@ -26,7 +26,7 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     let active = true
-    const token = localStorage.getItem(TOKEN_STORAGE_KEY)
+    const token = authSession.get()
 
     if (!token) {
       setLoading(false)
@@ -70,7 +70,7 @@ export function AuthProvider({ children }) {
   }, [])
 
   const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_STORAGE_KEY)
+    authSession.clear()
     setUser(null)
   }, [])
 

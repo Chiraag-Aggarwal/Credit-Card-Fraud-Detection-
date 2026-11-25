@@ -1,6 +1,6 @@
 import RiskBadge from './RiskBadge'
 import { usePreferences } from '../context/PreferencesContext'
-import { formatTime, formatAmount, formatProbability, sourceText, statusText } from '../utils/transactionDisplay'
+import { formatTime, formatAmount, formatProbability, sourceText, statusText, scoringReasonText } from '../utils/transactionDisplay'
 
 export default function TransactionTable({ items, error, onRetry }) {
   const { t, locale } = usePreferences()
@@ -20,15 +20,15 @@ export default function TransactionTable({ items, error, onRetry }) {
               <td className="whitespace-nowrap font-semibold">{formatAmount(item.displayAmount, item.currency, locale)}</td>
               <td>{formatProbability(item.fraudProbability, locale)}</td>
               <td><RiskBadge risk={item.riskLabel} /></td>
-              <td>{sourceText(item.source, t)}</td><td>{statusText(item.scoringStatus, t)}</td>
+              <td>{sourceText(item.source, t, item.paymentMode)}</td><td>{statusText(item.scoringStatus, t)}{item.scoringStatus === 'pending_review' && <p className="text-muted mt-1 max-w-64 text-xs">{scoringReasonText(item, t)}</p>}</td>
             </tr>)}</tbody>
           </table>
         </div>
         <ul className="mobile-transaction-list space-y-3 px-4 pb-4 md:hidden">
           {items.map((item) => <li className="transaction-mobile-card" key={item.id}>
             <div className="flex items-start justify-between gap-3"><div><p className="text-lg font-bold">{formatAmount(item.displayAmount, item.currency, locale)}</p><p className="text-muted mt-1 text-xs">{formatTime(item.createdAt, locale)}</p></div><RiskBadge risk={item.riskLabel} /></div>
-            <dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-muted text-xs">{t('Fraud probability', 'धोखाधड़ी की संभावना')}</dt><dd className="mt-1 font-semibold">{formatProbability(item.fraudProbability, locale)}</dd></div><div><dt className="text-muted text-xs">{t('Source', 'स्रोत')}</dt><dd className="mt-1">{sourceText(item.source, t)}</dd></div></dl>
-            <p className="text-muted mt-3 text-xs">{statusText(item.scoringStatus, t)}</p>
+            <dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-muted text-xs">{t('Fraud probability', 'धोखाधड़ी की संभावना')}</dt><dd className="mt-1 font-semibold">{formatProbability(item.fraudProbability, locale)}</dd></div><div><dt className="text-muted text-xs">{t('Source', 'स्रोत')}</dt><dd className="mt-1">{sourceText(item.source, t, item.paymentMode)}</dd></div></dl>
+            <p className="text-muted mt-3 text-xs">{scoringReasonText(item, t) || statusText(item.scoringStatus, t)}</p>
           </li>)}
         </ul>
       </>}

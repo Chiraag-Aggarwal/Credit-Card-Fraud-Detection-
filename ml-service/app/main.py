@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field
 
-from app.model_loader import load_model_artifacts
+from app.model_loader import FEATURE_COLUMNS, load_model_artifacts, predict_probabilities
 from app.schemas import (
     ExplanationResponse,
     FeatureImpact,
@@ -22,20 +22,26 @@ from app.schemas import (
 
 
 logger = logging.getLogger("fraud_detection_api")
-FEATURE_COLUMNS = ["Time", *[f"V{i}" for i in range(1, 29)], "Amount"]
 MAX_BATCH_SIZE = 100
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    application.state.ready = False
+    if os.getenv("APP_ENV", "development").strip().lower() == "production" and not os.getenv("ML_API_KEY", "").strip():
+        raise RuntimeError("ML_API_KEY must be non-empty in production.")
     model, threshold, metrics, model_version, threshold_settings = load_model_artifacts()
     application.state.model = model
     application.state.threshold = threshold
     application.state.metrics = metrics
     application.state.model_version = model_version
     application.state.threshold_settings = threshold_settings
+    application.state.ready = True
     logger.info("Loaded fraud model version %s", model_version)
-    yield
+    try:
+        yield
+    finally:
+        application.state.ready = False
 
 
 app = FastAPI(title="Fraud Detection ML Service", lifespan=lifespan)
@@ -74,7 +80,9 @@ async def log_requests(request: Request, call_next):
 def verify_api_key(
     api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> None:
-    expected_key = os.getenv("ML_API_KEY")
+    expected_key = os.getenv("ML_API_KEY") or None
+    if os.getenv("APP_ENV", "development").strip().lower() == "production" and not (expected_key or "").strip():
+        raise HTTPException(status_code=503, detail="ML service authentication is not configured.")
     if expected_key is not None and (
         api_key is None or not hmac.compare_digest(api_key, expected_key)
     ):
@@ -85,11 +93,17 @@ def make_prediction(
     features: TransactionFeatures,
     request: Request,
 ) -> PredictionResponse:
+    if not getattr(request.app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="The model is not ready.")
     row = pd.DataFrame(
         [[getattr(features, column) for column in FEATURE_COLUMNS]],
         columns=FEATURE_COLUMNS,
     )
-    probability = float(request.app.state.model.predict_proba(row)[0, 1])
+    try:
+        probability = float(predict_probabilities(request.app.state.model, row)[0])
+    except Exception:
+        logger.exception("Model prediction failed validation")
+        raise HTTPException(status_code=503, detail="The model could not produce a valid prediction.") from None
     threshold = request.app.state.threshold
     if probability >= threshold:
         risk_label = "HIGH"
@@ -111,6 +125,8 @@ def make_explanation(
     request: Request,
 ) -> ExplanationResponse:
     """Return TreeSHAP impacts for XGBoost or exact coefficient impacts for logistic regression."""
+    if not getattr(request.app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="The model is not ready.")
     model = request.app.state.model
     steps = getattr(model, "named_steps", {})
     classifier = steps.get("classifier")
@@ -148,7 +164,11 @@ def make_explanation(
             detail="This model does not support local feature explanations.",
         )
 
-    if len(feature_impacts) != len(feature_names):
+    if (
+        len(feature_impacts) != len(feature_names)
+        or not np.isfinite(baseline_log_odds)
+        or not np.isfinite(feature_impacts).all()
+    ):
         raise HTTPException(
             status_code=503,
             detail="The model could not produce a complete explanation.",
@@ -177,6 +197,8 @@ def make_explanation(
 
 @app.get("/health")
 async def health(request: Request) -> dict[str, str | bool]:
+    if not getattr(request.app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="The model is not ready.")
     return {
         "status": "model_loaded",
         "model_loaded": hasattr(request.app.state, "model"),

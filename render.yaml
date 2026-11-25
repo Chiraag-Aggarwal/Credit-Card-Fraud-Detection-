@@ -1,0 +1,75 @@
+# Supply the actual public URLs in the Blueprint creation form. Render does not
+# interpolate strings here. DATABASE_URL is an external Neon PostgreSQL URL with
+# sslmode=require; this Blueprint intentionally creates no paid database.
+services:
+  - type: web
+    name: fraud-ml
+    runtime: python
+    plan: free
+    rootDir: ml-service
+    buildCommand: python -m pip install --upgrade pip==26.2 && python -m pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: fraud-service-auth
+      - key: APP_ENV
+        value: production
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+
+  - type: web
+    name: fraud-api
+    runtime: python
+    plan: free
+    rootDir: server
+    buildCommand: python -m pip install --upgrade pip==26.2 && python -m pip install -r requirements.txt
+    # Free web services have no preDeployCommand. Run migrations before accepting
+    # requests on this single-instance deployment. On paid/scaled services, move
+    # the migration command to preDeployCommand and coordinate schema changes.
+    startCommand: python scripts/migrate_database.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: fraud-service-auth
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_URL
+        sync: false
+      - key: ML_SERVICE_URL
+        sync: false
+      - key: PAYMENTS_ENABLED
+        value: "false"
+      - key: ALLOW_LIVE_PAYMENTS
+        value: "false"
+
+  - type: web
+    name: fraud-dashboard
+    runtime: static
+    rootDir: client
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: VITE_USE_MOCK
+        value: "false"
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+envVarGroups:
+  - name: fraud-service-auth
+    envVars:
+      - key: ML_API_KEY
+        generateValue: true

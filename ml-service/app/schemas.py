@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TransactionFeatures(BaseModel):
@@ -39,6 +39,7 @@ class TransactionFeatures(BaseModel):
 
 
 class PredictionResponse(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     fraud_probability: float = Field(ge=0, le=1)
     risk_label: Literal["LOW", "MEDIUM", "HIGH"]
     is_fraud: bool
@@ -47,15 +48,30 @@ class PredictionResponse(BaseModel):
 
 
 class ModelMetrics(BaseModel):
-    precision: float
-    recall: float
-    f1: float
-    roc_auc: float
-    pr_auc: float
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    precision: float = Field(ge=0, le=1)
+    recall: float = Field(ge=0, le=1)
+    f1: float = Field(ge=0, le=1)
+    roc_auc: float = Field(ge=0, le=1)
+    pr_auc: float = Field(ge=0, le=1)
     confusion_matrix: list[list[int]]
+
+    @field_validator("confusion_matrix", mode="before")
+    @classmethod
+    def validate_confusion_matrix(cls, value):
+        if (
+            not isinstance(value, list)
+            or len(value) != 2
+            or any(not isinstance(row, list) or len(row) != 2 for row in value)
+            or any(type(count) is not int or count < 0 for row in value for count in row)
+        ):
+            raise ValueError("Confusion matrix must contain two rows of two non-negative integers.")
+        return value
 
 
 class ModelInfoResponse(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     model_version: str
     threshold: float = Field(ge=0, le=1)
     min_precision: float = Field(ge=0, le=1)
@@ -64,6 +80,7 @@ class ModelInfoResponse(BaseModel):
 
 
 class FeatureImpact(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     feature: str
     value: float
     impact: float
@@ -71,6 +88,7 @@ class FeatureImpact(BaseModel):
 
 
 class ExplanationResponse(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     fraud_probability: float = Field(ge=0, le=1)
     threshold: float = Field(ge=0, le=1)
     model_version: str

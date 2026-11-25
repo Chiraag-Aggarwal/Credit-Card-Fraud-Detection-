@@ -1,5 +1,6 @@
 import { AxiosError } from 'axios'
 import { createMockTransaction, mockTransactions } from './mockData.js'
+import { passwordValidation } from '../utils/passwordValidation.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const HOUR_MS = 60 * 60 * 1000
@@ -469,11 +470,11 @@ export default async function mockApiAdapter(config) {
       const email = String(body.email || '').trim().toLowerCase()
       const password = String(body.password || '')
 
-      if (!name || name.length > 120 || email.length > 254 || !validateEmail(email) || password.length < 8) {
+      if (!name || name.length > 120 || email.length > 254 || !validateEmail(email) || passwordValidation(password)) {
         rejectRequest(
           config,
           422,
-          'Enter a name, a valid email, and a password with at least 8 characters.',
+          'Enter a name, a valid email, and a password of at least 8 characters and at most 72 UTF-8 bytes.',
           'INVALID_INPUT',
         )
       }
@@ -489,11 +490,11 @@ export default async function mockApiAdapter(config) {
       const email = String(body.email || '').trim().toLowerCase()
       const password = String(body.password || '')
 
-      if (!validateEmail(email) || password.length < 8) {
+      if (!validateEmail(email) || passwordValidation(password)) {
         rejectRequest(
           config,
           422,
-          'Enter a valid email and a password with at least 8 characters.',
+          'Enter a valid email and a password of at least 8 characters and at most 72 UTF-8 bytes.',
           'INVALID_INPUT',
         )
       }
@@ -563,6 +564,11 @@ export default async function mockApiAdapter(config) {
     if (method === 'patch' && reviewMatch) {
       requireUser(config)
       return updateReview(config, reviewMatch[1], body)
+    }
+
+    if (method === 'get' && pathname === '/api/payments/status') {
+      requireUser(config)
+      return makeResponse(config, 200, { provider: 'razorpay', mode: 'disabled', enabled: false, reason: 'Mock mode does not process payments.' })
     }
 
     if (method === 'post' && pathname === '/api/payments/checkout-session') {

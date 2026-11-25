@@ -1,71 +1,20 @@
-"""Profile API regression tests; no running MongoDB or ML service is required.
+"""Profile API regression tests against the SQL domain repository.
 
 Run from server/: python -m unittest discover -s tests -v
 """
 
-from copy import deepcopy
-import os
-from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
-
-from bson import ObjectId
-from fastapi.testclient import TestClient
-from pymongo.errors import DuplicateKeyError
-
-from app.main import app, _rate_limit_windows
-from app.security import hash_password, issue_token
+from tests.api_test_support import ApiTestCase
 
 
-class UserCollection:
-    """Only the Mongo operations used by authentication and profile updates."""
-
-    def __init__(self, records):
-        self.records = deepcopy(records)
-
-    def find_one(self, query):
-        record = next((row for row in self.records if all(row.get(key) == value for key, value in query.items())), None)
-        return deepcopy(record)
-
-    def find_one_and_update(self, query, update, **_options):
-        record = next((row for row in self.records if all(row.get(key) == value for key, value in query.items())), None)
-        if record is None:
-            return None
-        changes = update["$set"]
-        if any(row["_id"] != record["_id"] and row["email"] == changes["email"] for row in self.records):
-            raise DuplicateKeyError("email unique index")
-        record.update(changes)
-        return deepcopy(record)
-
-
-class ProfileTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.password_hash = hash_password("profile-test-password")
-
-    def setUp(self):
-        self.environment = patch.dict(os.environ, {"JWT_SECRET": "profile-test-secret-not-for-production-123456"})
-        self.environment.start()
-        self.addCleanup(self.environment.stop)
-        _rate_limit_windows.clear()
-        self.owner_id = ObjectId()
-        self.other_id = ObjectId()
-        self.collection = UserCollection([
-            {"_id": self.owner_id, "name": "First User", "email": "first@example.com", "passwordHash": self.password_hash, "role": "merchant"},
-            {"_id": self.other_id, "name": "Second User", "email": "second@example.com", "passwordHash": self.password_hash, "role": "merchant"},
-        ])
-        app.state.db = SimpleNamespace(users=self.collection)
-        # Omitting the TestClient context avoids starting an external MongoDB connection.
-        self.client = TestClient(app)
-        self.addCleanup(self.client.close)
-        self.headers = {"Authorization": "Bearer " + issue_token(str(self.owner_id), "merchant")}
+class ProfileTests(ApiTestCase):
 
     def test_update_is_scoped_to_authenticated_user_and_hides_private_fields(self):
         response = self.client.patch("/api/auth/me", json={"name": "  Updated Name  ", "email": "NEW@EXAMPLE.COM"}, headers=self.headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"user": {"id": str(self.owner_id), "name": "Updated Name", "email": "new@example.com", "role": "merchant"}})
-        self.assertEqual(self.collection.find_one({"_id": self.other_id})["name"], "Second User")
-        self.assertEqual(self.collection.find_one({"_id": self.owner_id})["passwordHash"], self.password_hash)
+        self.assertEqual(self.repository.get_user(self.other_id)["name"], "Second User")
+        self.assertEqual(self.repository.get_user(self.owner_id)["passwordHash"], self.password_hash)
 
     def test_missing_and_invalid_token_are_rejected(self):
         body = {"name": "Changed", "email": "changed@example.com"}
@@ -86,13 +35,13 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(body=body):
                 response = self.client.patch("/api/auth/me", json=body, headers=self.headers)
                 self.assertEqual(response.status_code, 422)
-        self.assertEqual(self.collection.find_one({"_id": self.owner_id})["email"], "first@example.com")
+        self.assertEqual(self.repository.get_user(self.owner_id)["email"], "first@example.com")
 
     def test_duplicate_email_returns_conflict_without_changing_profile(self):
         response = self.client.patch("/api/auth/me", json={"name": "Changed", "email": "SECOND@EXAMPLE.COM"}, headers=self.headers)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "EMAIL_EXISTS")
-        self.assertEqual(self.collection.find_one({"_id": self.owner_id})["name"], "First User")
+        self.assertEqual(self.repository.get_user(self.owner_id)["name"], "First User")
 
     def test_unchanged_email_is_allowed(self):
         response = self.client.patch("/api/auth/me", json={"name": "New Name", "email": "first@example.com"}, headers=self.headers)

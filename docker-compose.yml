@@ -1,0 +1,55 @@
+# Local API + ML + PostgreSQL. Run the Vite client separately on port 5173.
+# Set POSTGRES_PASSWORD (URL-safe characters), ML_API_KEY and JWT_SECRET first.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a local PostgreSQL password}
+      POSTGRES_DB: fraud
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ml:
+    build: ./ml-service
+    environment:
+      APP_ENV: production
+      ML_API_KEY: ${ML_API_KEY:?Set a shared ML service key}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+
+  api:
+    build: ./server
+    ports:
+      - "127.0.0.1:5000:5000"
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://fraud:${POSTGRES_PASSWORD:?Set a local PostgreSQL password}@postgres:5432/fraud
+      JWT_SECRET: ${JWT_SECRET:?Set a JWT secret of at least 32 characters}
+      CLIENT_URL: http://localhost:5173
+      ML_SERVICE_URL: http://ml:8000
+      ML_API_KEY: ${ML_API_KEY:?Set a shared ML service key}
+      PAYMENTS_ENABLED: "false"
+      ALLOW_LIVE_PAYMENTS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ml:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

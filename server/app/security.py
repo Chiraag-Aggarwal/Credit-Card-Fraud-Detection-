@@ -8,7 +8,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 def jwt_secret() -> str:
     secret = os.getenv("JWT_SECRET", "")
-    if len(secret) < 32:
+    if len(secret.strip()) < 32:
         raise RuntimeError("JWT_SECRET must contain at least 32 characters.")
     return secret
 
@@ -27,7 +27,8 @@ def verify_password(password: str, password_hash: str) -> bool:
 def issue_token(user_id: str, role: str) -> str:
     now = datetime.now(timezone.utc)
     return jwt.encode(
-        {"sub": user_id, "role": role, "iat": now, "exp": now + timedelta(days=7)},
+        {"sub": user_id, "role": role, "type": "access", "aud": "fraud-dashboard",
+         "iss": "fraud-api", "iat": now, "exp": now + timedelta(days=7)},
         jwt_secret(),
         algorithm="HS256",
     )
@@ -41,19 +42,18 @@ def current_user(
         raise HTTPException(status_code=401, detail={"message": "Authentication is required.", "code": "UNAUTHORIZED"})
     token = authorization.split(" ", 1)[1].strip()
     try:
-        payload = jwt.decode(token, jwt_secret(), algorithms=["HS256"])
+        payload = jwt.decode(
+            token, jwt_secret(), algorithms=["HS256"], audience="fraud-dashboard",
+            issuer="fraud-api", options={"require": ["exp", "iat", "sub", "type"]},
+        )
+        if payload.get("type") != "access":
+            raise jwt.InvalidTokenError("Wrong token purpose")
         user_id = payload.get("sub")
     except jwt.PyJWTError:
         user_id = None
     if not user_id:
         raise HTTPException(status_code=401, detail={"message": "The login session is invalid or expired.", "code": "UNAUTHORIZED"})
-    from bson import ObjectId
-
-    user = (
-        request.app.state.db.users.find_one({"_id": ObjectId(user_id)})
-        if ObjectId.is_valid(user_id)
-        else None
-    )
+    user = request.app.state.db.get_user(user_id)
     if not user:
         raise HTTPException(status_code=401, detail={"message": "User account was not found.", "code": "UNAUTHORIZED"})
     return user

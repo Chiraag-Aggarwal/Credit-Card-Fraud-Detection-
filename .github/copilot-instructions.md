@@ -1,12 +1,15 @@
 # Project: Fraud Detection Payment Dashboard
-Real-time fraud scoring for online payments. Monorepo with three services:
+Historical fraud analysis and manual payment review. Monorepo with three services:
 - /client: React (Vite), React Router, Axios, Recharts, Tailwind
-- /server: Node.js + Express (ES modules), MongoDB via Mongoose, JWT auth, Stripe test-mode webhooks
-- /ml-service: Python 3.11, FastAPI, scikit-learn, XGBoost, imbalanced-learn, joblib
+- /server: Python 3.12, FastAPI, PostgreSQL via SQLAlchemy, Alembic migrations, JWT auth, optional Razorpay integration (disabled by default)
+- /ml-service: Python 3.12, FastAPI, scikit-learn, XGBoost, imbalanced-learn, joblib
 
 ## Data flow
-Stripe payment_intent.succeeded webhook -> Express -> POST ml-service /predict -> fraud probability +
-risk label -> saved in MongoDB -> React dashboard.
+Dataset replay -> FastAPI -> authenticated ML prediction -> probability/risk -> PostgreSQL -> dashboard.
+Batch feature submissions return model predictions without saving uploaded rows.
+Razorpay captured payments lack the anonymous dataset features: save them unscored for manual review;
+never substitute an unrelated sample's risk score. Checkout requires explicitly configured credentials,
+and live payments remain disabled unless explicitly authorized. Legacy Express code is in /server/legacy-express.
 
 ## ML rules (important)
 - Dataset: Kaggle Credit Card Fraud (Time, V1..V28, Amount, Class). Fraud is about 0.17% of rows.

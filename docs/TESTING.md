@@ -1,36 +1,70 @@
-# Testing the dashboard
+# Verification
 
 ## Automated checks
 
-From `client/`, install the packages with `npm ci`, then run:
+Use Node.js 22 and Python 3.12. CI runs these three groups independently.
 
-```sh
+From client/:
+
+```powershell
+npm ci
 npm test
 npm run lint
+$env:VITE_USE_MOCK = 'false'
+$env:VITE_API_URL = 'https://your-api.onrender.com'
 npm run build
 ```
 
-The frontend tests cover stored appearance settings, invalid or blocked browser storage, Hindi error messages, mock profile editing and duplicate emails, stable login identity after an email edit, stale request cancellation, and inclusive date filters.
+A real production build requires an absolute HTTPS API origin (HTTP is accepted only for local development hosts). Explicit mock builds may omit it. Client tests cover preferences, storage failures, Hindi errors, profile edits, request cleanup, date filters, checkout availability and token handling, separate auth modes, and password byte limits.
 
-From `server/`, install `requirements.txt` in a virtual environment, then run:
+From server/:
 
-```sh
+```powershell
+python -m pip install --upgrade pip==26.2
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-These profile API tests use an isolated database adapter. They check authentication, input validation, duplicate-email conflicts, user isolation, private-field protection, and login after changing an email. A running MongoDB instance or ML service is not needed for these tests.
+Set TEST_DATABASE_URL to a disposable PostgreSQL database for the PostgreSQL tests and API integration tests. Each suite creates and drops only its own random test schema. Without the variable, API tests use temporary SQLite and the PostgreSQL variants are skipped. Deployed startup accepts PostgreSQL only.
 
-## Browser checks
+Tests cover schema migration, persistence, IDs, decimal money, uniqueness, user isolation, authentication/profile validation, token purpose, stats/filters/pagination, review audits, model outages and batch simulation. Razorpay requests are mocked: tests check signatures, amount/order/currency mismatches, disabled payments, duplicate notifications and retryable unresolved payments. No actual payment is made.
 
-Use `VITE_USE_MOCK=true` for frontend checks without the backend. Demo profile information stays in this browser; mock transactions reset after a reload.
+From ml-service/:
 
-1. Register, sign in, and open each screen. Check the 24-hour and 30-day charts.
-2. Simulate ten transactions, simulate a fraud burst, and try demo checkout. Confirm that the totals update and that the checkout says no payment was processed.
-3. Filter flagged transactions by risk and dates, view explanations, and try both review decisions. Check pagination after marking a payment legitimate.
-4. Update a profile name and email, refresh, and sign in using the new email. Try an invalid email and cancel an unsaved edit.
-5. Change language, brightness, colour, font size, and font family. Refresh and confirm the choices remain. Check Hindi with large text in dark mode.
-6. Upload a valid CSV and an invalid CSV to Batch AI analysis. Confirm results and clear validation messages.
-7. Check the layouts at 1440, 390, and 320 pixels wide. Phone pages should not scroll sideways; wide analysis tables have their own scroll area.
-8. Confirm transaction polling runs every five seconds and stops when leaving the dashboard. Alert polling runs every fifteen seconds and stops after logout.
+```powershell
+python -m pip install --upgrade pip==26.2
+python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1
+python -m pytest tests -q
+python -m pip check
+```
 
-For real API testing, use `VITE_USE_MOCK=false`, set `VITE_API_URL`, and run the Python API with MongoDB and the model service. Test Razorpay with test credentials only. The demo checkout is not a real payment-provider integration test.
+The model suite loads the saved model, checks readiness/authentication and predictions, and covers preprocessing, split/resampling boundaries, threshold selection, explanations and replay generation. It does not retrain the full dataset on every run.
+
+## Browser checks with real services
+
+Use VITE_USE_MOCK=false and the actual local API origin. Start PostgreSQL, the API and model service. Keep PAYMENTS_ENABLED=false for this checklist unless specifically testing Razorpay test credentials.
+
+1. Confirm both /health endpoints succeed. Register a fresh user; the dashboard starts empty.
+2. Simulate ten rows and a fraud burst. Check real model scores, chart totals and saved rows after reload.
+3. Filter flagged rows, page through results, view explanations, and mark rows legitimate/fraud. The alert count and flagged results must reflect decisions.
+4. Change profile name/email, refresh, log out, and sign in with the new email.
+5. Check a second user's account cannot see or change the first user's private records.
+6. Upload a compatible CSV and an invalid CSV. Confirm meaningful results and validation errors.
+7. Change English/Hindi, brightness, theme, font size and font family. Refresh to check persistence.
+8. Check 1440/390/320-pixel widths and direct refreshes of /flagged, /profile and /settings.
+9. Verify disabled checkout is clearly explained. Do not report a fake payment success.
+10. Stop/restart the API and confirm PostgreSQL records remain. An unavailable model should result in manual review rather than fabricated scores.
+
+Razorpay test checkout still needs provider credentials and a reachable configured webhook to verify the complete provider round trip. Unit tests, a disabled button, and mock checkout do not prove that external connection. Captured payments have no dataset-compatible features and must remain unscored for manual review.
+
+## Optional mock regression
+
+VITE_USE_MOCK=true provides the separate frontend demonstration. Verify its banner and no-payment notice. Mock transactions reset on reload, while demo profile/preferences stay in browser storage. Switching back to real mode requires a fresh real sign-in.
+
+## Local verification record
+
+The deployment preparation was checked with PostgreSQL 17.12, Python 3.12 and the committed XGBoost artifact. The API/repository suite passed 43 tests against real PostgreSQL and SQLite, with no PostgreSQL skips. The ML suite passed 34 tests. The frontend suite passed 32 tests and 16 real-service browser scenarios passed 54 assertions, including phone layouts. The database backup/restore and forward-migration restart checks preserved the test records; CI execution on GitHub and a hosted deployment require pushing/configuring the release.
+
+A dependency advisory review on 25 November 2026 identified and patched follow-redirects 1.16.1 to 1.16.2 in the npm lockfile. Python runtime/model packages had no advisories in the queried PyPI records; build bootstrap pins pip 26.2 to avoid advisories in the old installer. This is a package advisory check, not a guarantee against unknown vulnerabilities or an operating-system audit.
+
+A fresh installation from the patched npm lockfile also passed all 32 client tests, lint with zero warnings, and the production build. The production bundle passed three additional browser scenarios with 11 assertions, including API registration, live polling, profile persistence and disabled checkout. No payment-provider request occurred.

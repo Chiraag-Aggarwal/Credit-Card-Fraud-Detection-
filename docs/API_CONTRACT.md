@@ -11,7 +11,7 @@ This document defines the request and response shapes used by the Fraud Detectio
 - Protected endpoints require `Authorization: Bearer <token>`. The token is returned by registration or login.
 - Errors use this shape: `{ "error": { "message": "...", "code": "..." } }`.
 - `401` means unauthenticated, `422` means invalid input, and `429` means rate limited.
-- The Python API rate-limits general API traffic to 600 requests per 15 minutes per client address; login/registration and simulation each allow 10 requests per 15 minutes.
+- The Python API rate-limits general API traffic to 1,200 requests per 15 minutes per client address; login/registration and simulation each allow 10 requests per 15 minutes.
 - Responses use `id`, not `_id`, and never include the 30 model input features.
 
 ## Transaction
@@ -27,12 +27,18 @@ This document defines the request and response shapes used by the Fraud Detectio
 | `riskLabel` | `LOW`, `MEDIUM`, `HIGH`, or `UNSCORED` |
 | `isFlagged` | boolean |
 | `scoringStatus` | `scored` or `pending_review` |
+| `scoringReason` | `null`, `model_unavailable`, or `unsupported_payment_features` |
+| `paymentMode` | `null`, `test`, or `live`; provider test payments are explicitly labelled |
 | `modelVersion` | string, such as `xgb-v1` |
 | `reviewDecision` | `null`, `confirmed_fraud`, or `legit` |
 | `stripePaymentIntentId` | string or `null` |
 | `razorpayPaymentId` | string or `null` |
 
 ## Endpoints
+
+### Deployment health
+
+`GET /health` is public. It returns `200 {"status":"ok","database":true}` after a successful PostgreSQL check, or `503 {"status":"unavailable","database":false}`. ML readiness is checked separately on the ML service.
 
 ### Authentication
 
@@ -48,7 +54,7 @@ Request:
 }
 ```
 
-`password` must be at least 8 characters. Response status is `201`.
+`password` must have at least 8 characters and at most 72 UTF-8 bytes. Whitespace is preserved; oversized passwords are rejected rather than truncated. Response status is `201`.
 
 ```json
 {
@@ -217,7 +223,7 @@ Results are newest first.
 }
 ```
 
-`fraudRate` and `avgProbability` are numbers from `0` to `1`. `series24h` is hourly and `series30d` is daily; `t` is an ISO date-time string.
+`fraudRate` and `avgProbability` are numbers from `0` to `1`. Despite its legacy name, `fraudRate` is the flagged share, not confirmed fraud incidence. Unscored rows are excluded from the average and histogram. `series24h` is hourly and `series30d` is daily; `t` is an ISO date-time string.
 
 #### `GET /api/transactions/score-histogram` - token required
 
@@ -277,7 +283,7 @@ Request `decision` is `confirmed_fraud` or `legit`.
 }
 ```
 
-Response is the updated `Transaction` object.
+Response is the updated `Transaction` object. `legit` sets `isFlagged=false`; `confirmed_fraud` sets it to true. Model probability/risk are preserved. The database stores the reviewer and review time; review decisions do not refund or block payments.
 
 #### `GET /api/transactions/:id/explanation` - token required
 
@@ -306,9 +312,17 @@ Each `topFactors` item has `feature` (string), `value` (number), `impact` (numbe
 
 ### Payments
 
+#### `GET /api/payments/status` - token required
+
+```json
+{"provider":"razorpay","mode":"disabled","enabled":false,"reason":"Payments are not enabled. Account activation and payment keys are required."}
+```
+
+`mode` is `disabled`, `test`, or `live`; `enabled` is boolean; `reason` is a user-readable string when disabled, otherwise null. No secrets are returned. Defaults are `PAYMENTS_ENABLED=false` and `ALLOW_LIVE_PAYMENTS=false`. Test mode needs configured Razorpay test credentials plus payments enabled. Live mode additionally needs live credentials and `ALLOW_LIVE_PAYMENTS=true`; account approval remains external. Mock mode reports an explicitly simulated test checkout and makes no provider call.
+
 #### `POST /api/payments/checkout-session` - token required
 
-Request `amount` is at least `1`, `currency` is `inr`, and `mode` is `normal` or `fraud-demo`. The active payment integration uses Razorpay test-mode orders. The returned URL opens the dashboard's Razorpay Checkout screen; it is not a Stripe URL.
+Request `amount` is from `1` to `999999.99`, with at most two decimal places; `currency` is `inr`, and `mode` must be `normal`. `fraud-demo` is rejected: use the simulation endpoint for historical fraud examples. The integration uses Razorpay. Checkout returns `503 PAYMENTS_UNAVAILABLE` when disabled or unconfigured. Test credentials are supported; live credentials additionally require deliberate activation.
 
 ```json
 {
@@ -322,17 +336,17 @@ Response (the browser navigates to `url`):
 
 ```json
 {
-  "url": "https://dashboard.example.com/checkout?order_id=...&key_id=...&amount=100&currency=INR&session_token=..."
+  "url": "https://dashboard.example.com/checkout?order_id=...&key_id=...&amount=100&currency=INR&session_token=...&mode=test"
 }
 ```
 
-The API creates a Razorpay Order server-side and stores its merchant, amount, currency, and demo mode. `key_id` is the public Razorpay key ID; `session_token` is a short-lived signed checkout token. Keep the Razorpay secret only on the API server. The API accepts only captured payments after verifying both the Razorpay checkout signature and payment status.
+The API creates a Razorpay Order server-side and stores its merchant, amount, currency, and payment mode. `key_id` is the public Razorpay key ID; `session_token` is a short-lived signed checkout token. The client moves the checkout token into tab session storage and removes it from the URL before rendering. Access JWTs and checkout JWTs have separate audiences/purposes; a checkout token cannot sign into the API. Keep the Razorpay secret only on the API server. The API accepts only captured payments after verifying both the Razorpay checkout signature and payment status.
 
-For this demo, checkout does not supply the anonymized PCA model inputs, so a replay row from the training dataset supplies those features. The recorded amount and provider IDs come from the captured test payment; the resulting fraud score is a demonstration, not a risk judgment about a real cardholder.
+Provider payments do not supply the anonymized PCA model inputs. They are recorded with the real provider amount and IDs, `fraudProbability=null`, `riskLabel="UNSCORED"`, `scoringStatus="pending_review"`, and `scoringReason="unsupported_payment_features"`. No replay row, ground-truth label, or model score is invented for a payment. `paymentMode` is taken from the stored order, not user input. Simulation remains a separate, labelled feature.
 
 #### `POST /api/payments/verify` - signed checkout session
 
-Razorpay Checkout sends the following fields to the client handler. The backend verifies the signed session, payment signature, order ownership, amount, currency, and captured status before recording and scoring a transaction.
+Razorpay Checkout sends the following fields to the client handler. The backend verifies the signed session, payment signature, order ownership, amount, currency, and captured status before recording an unscored transaction for manual review.
 
 Request:
 
@@ -355,11 +369,13 @@ Response:
     "displayAmount": 1,
     "currency": "inr",
     "source": "razorpay",
-    "fraudProbability": 0.12,
-    "riskLabel": "LOW",
-    "isFlagged": false,
-    "scoringStatus": "scored",
-    "modelVersion": "xgboost-v1",
+    "fraudProbability": null,
+    "riskLabel": "UNSCORED",
+    "isFlagged": true,
+    "scoringStatus": "pending_review",
+    "scoringReason": "unsupported_payment_features",
+    "paymentMode": "test",
+    "modelVersion": "",
     "reviewDecision": null,
     "stripePaymentIntentId": null,
     "razorpayPaymentId": "pay_example"
@@ -369,7 +385,7 @@ Response:
 
 #### `POST /api/webhooks/razorpay` - Razorpay webhook
 
-Configure the test-mode Razorpay webhook to send `payment.captured` events to this path. The API validates `X-Razorpay-Signature` against the raw request body and is idempotent by Razorpay payment ID. Webhooks are the reliable background path; checkout also verifies captured state immediately for the user-facing result.
+Configure the Razorpay webhook to send `payment.captured` events to this path. The API validates `X-Razorpay-Signature` against the exact body. PostgreSQL stores event ID/digest, payment ID and completion status; payment IDs are unique. Duplicate events return success after durable completion. An event whose order is missing or mismatched returns a retryable `503`, never a false acknowledgement. Monitor pending receipts and reconcile against the provider if retries expire. Other event types are acknowledged but refunds/disputes are not automatically processed. Webhooks do not wait for an ML call.
 
 ### Model information and alerts
 
@@ -401,126 +417,9 @@ Returns the number of flagged transactions that have not been reviewed.
   "count": 3
 }
 ```
-# API Contract (source of truth for frontend and backend)
 
-- Base URL: VITE_API_URL (local: http://localhost:5000). Every path below starts with /api. JSON only.
-- Protected routes need the header Authorization: Bearer <token> (token comes from login/register).
-- Errors always look like {"error":{"message":"...","code":"..."}}. Status 401 = not logged in (UI goes to /login), 422 = bad input, 429 = too many requests.
-- The API returns id (not _id) and never returns the 30 model features.
+## Request limits and authentication
 
-## Transaction object
+JSON bodies are limited to 512 KB; oversized requests return `413 PAYLOAD_TOO_LARGE`. Authentication and simulation allow ten requests per 15 minutes per address; batch prediction and checkout allow twenty. General traffic allows 1,200. Signed webhooks bypass the browser limiter. `429` includes `Retry-After`. The current limiter is per process; use shared limits before adding API workers.
 
-- id: string
-- createdAt: ISO date string
-- displayAmount: number (major units, e.g. 49.99)
-- currency: string, e.g. "usd"
-- source: "razorpay" or "simulated" (old Stripe records may still be returned as "stripe")
-- fraudProbability: number 0 to 1, or null when UNSCORED
-- riskLabel: "LOW" | "MEDIUM" | "HIGH" | "UNSCORED"
-- isFlagged: boolean
-- scoringStatus: "scored" or "pending_review" (ML service was down)
-- modelVersion: string, e.g. "xgb-v1"
-- reviewDecision: null | "confirmed_fraud" | "legit"
-- stripePaymentIntentId: string or null (legacy records)
-- razorpayPaymentId: string or null
-
-## Endpoints
-
-### POST /auth/register [auth: public]
-
-Request: `{name, email, password (min 8)}`
-
-Response: `201 {token, user}` where user = `{id, name, email, role}`
-
-### POST /auth/login [auth: public]
-
-Request: `{email, password}`
-
-Response: `{token, user}`
-
-### GET /auth/me [auth: token]
-
-Request:
-
-Fraud Detection Dashboard  |  Module A (ML + Backend) Page 6  
-PROMPT T0.1 - Write the API contract file
-
-Response: `{user}`
-
-### PATCH /auth/me [auth: token]
-
-Request: `{name, email}` (both required; name 1–120 characters, valid email up to 254 characters). Unknown fields are rejected.
-
-Response: `{user}` with unchanged ID and role. Updates only the signed-in account. Duplicate email returns `409 EMAIL_EXISTS`; invalid input returns `422`. Existing JWTs remain valid; login then uses the new email.
-
-### GET /transactions [auth: token]
-
-Request: query: page (1), limit (20), riskLabel, flagged (true), from, to (ISO dates). Newest first.
-
-Response: `{items: [Transaction], page, limit, total}`
-
-### GET /transactions/stats [auth: token]
-
-Request:
-
-Response: `{total, flagged, fraudRate (0-1), avgProbability (0-1), byRisk: {LOW, MEDIUM, HIGH, UNSCORED}, series24h: [{t, total, flagged}], series30d: [{t, total, flagged}]} (t = ISO date; hourly for 24h, daily for 30d)`
-
-### GET /transactions/score-histogram [auth: token]
-
-Request:
-
-Response: `{bins: [{from, to, count}]}` (10 bins from 0.0 to 1.0)
-
-### POST /transactions/simulate [auth: token]
-
-Request: `{count (1-50), mode: "random" | "fraud"}`
-
-Response: `{created, items: [Transaction]}`
-
-### PATCH /transactions/:id/review [auth: token]
-
-Request: `{decision: "confirmed_fraud" | "legit"}`
-
-Response: `Transaction (updated)`
-
-### POST /predictions/batch [auth: token]
-
-Request: `{transactions: [TransactionFeatures]}` (1–100 entries; each has `Time`, `V1`–`V28`, `Amount`)
-
-Response: `{count, items: [{index, fraudProbability, riskLabel, isFlagged, threshold, modelVersion}]}`. Inputs are not saved and the output does not repeat model features.
-
-### GET /transactions/:id/explanation [auth: token]
-
-Returns merchant-scoped feature impacts for a scored transaction; pending-review transactions return 409. XGBoost uses TreeSHAP and logistic regression uses exact coefficients. Impacts are in log-odds, where positive increases and negative lowers the model score.
-
-Response: `{transactionId, fraudProbability, threshold, modelVersion, method, baselineLogOdds, topFactors: [{feature, value, impact, direction: "increases_risk" | "decreases_risk"}]}` where `method` is `tree_shap` or `linear_coefficients`.
-
-### POST /payments/checkout-session [auth: token]
-
-Request: `{amount (>= 1), currency ("inr"), mode: "normal" | "fraud-demo"}`
-
-Response: `{url}` (browser opens the app's Razorpay test checkout page)
-
-### POST /payments/verify [auth: signed checkout token]
-
-Request: `{sessionToken, razorpay_payment_id, razorpay_order_id, razorpay_signature}`
-
-Response: `{transaction}` after the backend verifies the captured Razorpay payment.
-
-### POST /webhooks/razorpay [auth: Razorpay HMAC signature]
-
-Accepts Razorpay `payment.captured` events and stores them idempotently.
-
-### GET /model-info [auth: token]
-
-Request:
-
-Response: `{model_version, threshold, min_precision, trained_at, metrics: {precision, recall, f1, roc_auc, pr_auc, confusion_matrix: [[tn, fp], [fn, tp]]}}`
-
-### GET /alerts/unread-count [auth: token]
-
-Request:
-
-Response: `{count}` (flagged transactions not yet reviewed)
-
-Rule: nobody changes this file silently. If a shape must change, update this file, commit, and message the other person
+Access tokens require audience `fraud-dashboard`, issuer `fraud-api`, type `access`, and expiration. Checkout tokens use audience `fraud-checkout` and type `checkout`. Older sessions require signing in again. The real and mock browser sessions use separate keys.

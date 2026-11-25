@@ -73,6 +73,7 @@ def test_client(tmp_path, monkeypatch):
         model_loader, "METRICS_PATH", artifacts_dir / "metrics.json"
     )
     monkeypatch.delenv("ML_API_KEY", raising=False)
+    monkeypatch.setenv("APP_ENV", "test")
     with TestClient(app) as client:
         yield client
 
@@ -265,3 +266,87 @@ def test_replay_fraud_average_probability_exceeds_genuine_average() -> None:
 
     # Probabilities vary with the fitted model and data, so check only the intended ranking.
     assert np.mean(fraud_probabilities) > np.mean(genuine_probabilities)
+
+
+@pytest.mark.parametrize("key", [None, "", "   "])
+def test_production_refuses_startup_without_nonblank_key(monkeypatch, key) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    if key is None:
+        monkeypatch.delenv("ML_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("ML_API_KEY", key)
+    with pytest.raises(RuntimeError, match="ML_API_KEY must be non-empty"):
+        with TestClient(app):
+            pass
+
+
+def test_health_returns_unavailable_without_ready_model(test_client, monkeypatch) -> None:
+    monkeypatch.setattr(app.state, "ready", False)
+    assert test_client.get("/health").status_code == 503
+    assert test_client.post("/predict", json=transaction()).status_code == 503
+
+
+@pytest.mark.parametrize("output", [
+    [[0.1, float("nan")]],
+    [[0.1, float("inf")]],
+    [[-0.2, 1.2]],
+    [[0.1, 0.1]],
+    [[0.9]],
+])
+def test_invalid_model_probabilities_return_unavailable(test_client, monkeypatch, output) -> None:
+    monkeypatch.setattr(app.state.model, "predict_proba", lambda _: output)
+    response = test_client.post("/predict", json=transaction())
+    assert response.status_code == 503
+    assert response.json()["detail"] == "The model could not produce a valid prediction."
+
+
+def test_production_authentication_fails_closed_if_configuration_removed(test_client, monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ML_API_KEY", raising=False)
+    assert test_client.post("/predict", json=transaction()).status_code == 503
+
+
+def test_protected_routes_accept_only_shared_key(test_client, monkeypatch) -> None:
+    monkeypatch.setenv("ML_API_KEY", "shared-test-key")
+    assert test_client.get("/model-info").status_code == 401
+    assert test_client.get("/model-info", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert test_client.get("/model-info", headers={"X-API-Key": "shared-test-key"}).status_code == 200
+    assert test_client.post("/predict", json=transaction(), headers={"X-API-Key": "shared-test-key"}).status_code == 200
+
+
+def test_empty_development_key_allows_local_prediction(test_client, monkeypatch) -> None:
+    monkeypatch.setenv("ML_API_KEY", "")
+    assert test_client.post("/predict", json=transaction()).status_code == 200
+
+
+def test_committed_artifact_serves_production_prediction_and_explanation(monkeypatch) -> None:
+    """Exercise the deployable artifact, with no dataset download or retraining."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ML_API_KEY", "production-artifact-test-key")
+    replay_path = Path(__file__).resolve().parents[1] / "data" / "replay_samples.json"
+    row = json.loads(replay_path.read_text(encoding="utf-8"))[0]
+    features = {column: row[column] for column in FEATURE_COLUMNS}
+    headers = {"X-API-Key": "production-artifact-test-key"}
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.post("/predict", json=features).status_code == 401
+        prediction = client.post("/predict", json=features, headers=headers)
+        explanation = client.post("/explain", json=features, headers=headers)
+        assert prediction.status_code == 200
+        assert explanation.status_code == 200
+        assert explanation.json()["fraud_probability"] == prediction.json()["fraud_probability"]
+        assert len(explanation.json()["top_factors"]) == 5
+
+
+def test_startup_rejects_incompatible_sklearn_artifact(monkeypatch) -> None:
+    import warnings
+    from sklearn.exceptions import InconsistentVersionWarning
+
+    def incompatible_load(_):
+        warnings.warn(InconsistentVersionWarning(
+            estimator_name="StandardScaler", current_sklearn_version="current", original_sklearn_version="old"
+        ))
+
+    monkeypatch.setattr(model_loader.joblib, "load", incompatible_load)
+    with pytest.raises(RuntimeError, match="Could not load model artifact"):
+        model_loader.load_model_artifacts()

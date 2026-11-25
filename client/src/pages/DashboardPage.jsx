@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import apiClient, { getApiErrorMessage } from '../api/client'
+import apiClient, { getApiErrorMessage, isMockMode } from '../api/client'
 import DashboardError from '../components/DashboardError'
 import DashboardSkeleton from '../components/DashboardSkeleton'
 import KpiCard from '../components/KpiCard'
@@ -10,9 +10,10 @@ import TimeSeriesChart from '../components/TimeSeriesChart'
 import TransactionTable from '../components/TransactionTable'
 import { useAuth } from '../context/AuthContext'
 import useRequestScope from '../hooks/useRequestScope'
+import { checkoutSessions } from '../utils/checkoutSession'
+import { normalizePaymentStatus } from '../utils/paymentStatus'
 
 import { usePreferences } from '../context/PreferencesContext'
-const isMockMode = import.meta.env.VITE_USE_MOCK === 'true'
 
 export default function DashboardPage() {
   const { t, locale, language } = usePreferences()
@@ -29,9 +30,37 @@ export default function DashboardPage() {
   const [actionNotice, setActionNotice] = useState('')
   const [period, setPeriod] = useState('24h')
   const [activeAction, setActiveAction] = useState('')
+  const [paymentStatus, setPaymentStatus] = useState(null)
+  const [paymentStatusError, setPaymentStatusError] = useState(false)
+  const [checkingPayments, setCheckingPayments] = useState(!isMockMode)
 
   const reads = useRequestScope()
   const actions = useRequestScope()
+  const paymentReads = useRequestScope()
+
+  const loadPaymentStatus = useCallback(async () => {
+    if (isMockMode) return
+    const request = paymentReads.begin()
+    if (!request) return
+    try {
+      const { data } = await apiClient.get('/api/payments/status', { signal: request.signal })
+      if (request.isCurrent()) setPaymentStatus(normalizePaymentStatus(data))
+    } catch {
+      if (request.isCurrent()) {
+        setPaymentStatus(null)
+        setPaymentStatusError(true)
+      }
+    } finally {
+      if (request.isCurrent()) setCheckingPayments(false)
+      request.finish()
+    }
+  }, [paymentReads])
+
+  function recheckPayments() {
+    setCheckingPayments(true)
+    setPaymentStatusError(false)
+    void loadPaymentStatus()
+  }
 
   const loadDashboard = useCallback(async () => {
     const request = reads.begin()
@@ -75,6 +104,7 @@ export default function DashboardPage() {
   }, [reads, actions])
 
   useEffect(() => { void loadDashboard() }, [loadDashboard])
+  useEffect(() => { void loadPaymentStatus() }, [loadPaymentStatus])
   useEffect(() => {
     const intervalId = window.setInterval(() => { void refreshTransactions() }, 5000)
     return () => window.clearInterval(intervalId)
@@ -99,7 +129,7 @@ export default function DashboardPage() {
   }
 
   async function startCheckout() {
-    if (actions.isPending()) return
+    if (actions.isPending() || (!isMockMode && (!paymentStatus?.enabled || checkingPayments))) return
     const request = actions.begin()
     if (!request) return
     setActionError(null)
@@ -115,9 +145,7 @@ export default function DashboardPage() {
         return
       }
       if (typeof data.url !== 'string' || !data.url) throw new Error('The checkout service did not return a redirect URL.')
-      const checkoutUrl = new URL(data.url, window.location.origin)
-      if (checkoutUrl.origin !== window.location.origin) throw new Error('The checkout service returned a URL for a different site.')
-      navigate(checkoutUrl.pathname + checkoutUrl.search)
+      navigate(checkoutSessions.prepare(data.url, window.location.origin))
     } catch (requestError) {
       if (request.isCurrent()) setActionError(requestError)
     } finally {
@@ -141,9 +169,10 @@ export default function DashboardPage() {
         <div className="flex flex-wrap gap-2">
           <button className="ui-button" disabled={isBusy} onClick={() => simulateTransactions(10, 'random', 'simulate')} type="button">{activeAction === 'simulate' ? t('Simulating…', 'सिमुलेट हो रहा है…') : t('Simulate 10 transactions', '10 लेन-देन सिमुलेट करें')}</button>
           <button className="ui-button ui-button-danger" disabled={isBusy} onClick={() => simulateTransactions(5, 'fraud', 'fraud')} type="button">{activeAction === 'fraud' ? t('Creating burst…', 'नमूने बन रहे हैं…') : t('Simulate fraud burst', 'धोखाधड़ी के नमूने बनाएँ')}</button>
-          <button className="ui-button ui-button-primary" disabled={isBusy} onClick={startCheckout} type="button">{activeAction === 'checkout' ? t('Starting checkout…', 'चेकआउट शुरू हो रहा है…') : isMockMode ? t('Try demo checkout', 'डेमो चेकआउट आज़माएँ') : t('Pay with Razorpay (test)', 'Razorpay से भुगतान (टेस्ट)')}</button>
+          <button className="ui-button ui-button-primary" disabled={isBusy || (!isMockMode && (checkingPayments || !paymentStatus?.enabled))} onClick={startCheckout} type="button">{activeAction === 'checkout' ? t('Starting checkout…', 'चेकआउट शुरू हो रहा है…') : isMockMode ? t('Try demo checkout', 'डेमो चेकआउट आज़माएँ') : paymentStatus?.mode === 'test' ? t('Pay with Razorpay (test)', 'Razorpay से भुगतान (टेस्ट)') : paymentStatus?.mode === 'live' ? t('Pay with Razorpay (live)', 'Razorpay से भुगतान (असली)') : t('Payments unavailable', 'भुगतान उपलब्ध नहीं')}</button>
         </div>
       </section>
+      {!isMockMode && (checkingPayments || !paymentStatus?.enabled) && <div aria-live="polite" className="notice notice-warning flex flex-wrap items-center justify-between gap-3" role="status"><p className="text-sm">{checkingPayments ? t('Checking payment availability…', 'भुगतान की उपलब्धता जाँची जा रही है…') : paymentStatusError ? t('Payment availability could not be checked. Please retry.', 'भुगतान की उपलब्धता जाँची नहीं जा सकी। फिर कोशिश करें।') : t('Payments are unavailable. Checkout will open after payment setup is complete.', 'भुगतान अभी उपलब्ध नहीं है। भुगतान की व्यवस्था पूरी होने पर चेकआउट खुलेगा।')}</p>{!checkingPayments && <button className="ui-button" onClick={recheckPayments} type="button">{t('Check again', 'फिर जाँचें')}</button>}</div>}
       {actionError && <p aria-live="polite" className="notice notice-error" role="alert">{getApiErrorMessage(actionError, t('The action could not finish. Please try again.', 'कार्रवाई पूरी नहीं हो सकी। फिर कोशिश करें।'), language)}</p>}
       {actionNotice && <p aria-live="polite" className="notice notice-success" role="status">{t('Demo checkout complete. No payment was processed.', 'डेमो चेकआउट पूरा हुआ। कोई वास्तविक भुगतान नहीं हुआ।')}</p>}
       <section aria-label={t('Transaction key performance indicators', 'लेन-देन के मुख्य आँकड़े')} className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -158,7 +187,7 @@ export default function DashboardPage() {
       </section>
       <TransactionTable error={transactionError ? getApiErrorMessage(transactionError, t('Could not refresh the transaction list.', 'लेन-देन सूची अपडेट नहीं हो सकी।'), language) : ''} items={Array.isArray(transactions) ? transactions : []} onRetry={refreshTransactions} />
       <ModelCard />
-      <p className="text-muted px-1 text-xs">{isMockMode ? t('Demo checkout only. No payment is processed.', 'केवल डेमो चेकआउट। कोई वास्तविक भुगतान नहीं होता।') : t('Razorpay test mode simulates payment. No real money is moved.', 'Razorpay टेस्ट मोड में नमूना भुगतान होता है। वास्तविक पैसे नहीं कटते।')}</p>
+      {(isMockMode || paymentStatus?.enabled) && <p className="text-muted px-1 text-xs">{isMockMode ? t('Demo checkout only. No payment is processed.', 'केवल डेमो चेकआउट। कोई वास्तविक भुगतान नहीं होता।') : paymentStatus.mode === 'test' ? t('Razorpay test mode simulates payment. No real money is moved.', 'Razorpay टेस्ट मोड में नमूना भुगतान होता है। वास्तविक पैसे नहीं कटते।') : t('Live checkout charges real money. Payments need manual risk review.', 'असली भुगतान में पैसे कटते हैं। भुगतान के जोखिम की मैन्युअल समीक्षा ज़रूरी है।')}</p>}
     </div>
   )
 }

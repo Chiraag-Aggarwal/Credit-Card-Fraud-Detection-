@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+        env:
+          VITE_USE_MOCK: "false"
+          VITE_API_URL: https://api.example.test
+
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fraud
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: fraud_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fraud -d fraud_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://fraud:ci-only-password@localhost:5432/fraud_test
+      TEST_DATABASE_URL: postgresql+psycopg://fraud:ci-only-password@localhost:5432/fraud_test
+      JWT_SECRET: ci-only-jwt-secret-at-least-32-characters
+      ML_API_KEY: ci-only-ml-key
+      PAYMENTS_ENABLED: "false"
+      ALLOW_LIVE_PAYMENTS: "false"
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - run: python -m pip install --upgrade pip==26.2
+      - run: python -m pip install -r requirements.txt
+      - run: python scripts/migrate_database.py
+      - run: python -m unittest discover -s tests -v
+
+  ml:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      MPLBACKEND: Agg
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    defaults:
+      run:
+        working-directory: ml-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            ml-service/requirements.txt
+            ml-service/requirements-dev.txt
+      - run: python -m pip install --upgrade pip==26.2
+      - run: python -m pip install -r requirements.txt pytest==9.1.1 httpx==0.28.1
+      - run: python -m pip check
+      - run: python -m pytest tests -q

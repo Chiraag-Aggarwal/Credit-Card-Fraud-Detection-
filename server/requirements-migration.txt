@@ -1,0 +1,3 @@
+-r requirements.txt
+# Only required for importing an existing MongoDB database.
+pymongo>=4.9,<5
