@@ -6,23 +6,22 @@ import {
   useMemo,
   useState,
 } from 'react'
-import apiClient, { authSession } from '../api/client'
+import apiClient, { authSession, isMockMode, sessionRotation } from '../api/client'
+import { revokeAccountSession, saveAccountSession } from '../utils/accountSecurity'
 
 const AuthContext = createContext(null)
-
-function saveSession(data, setUser) {
-  if (!data || typeof data.token !== 'string' || !data.user) {
-    throw new Error('The server returned an incomplete sign-in response.')
-  }
-
-  authSession.set(data.token)
-  setUser(data.user)
-  return data.user
-}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const syncSession = (event) => {
+      if (event.key === authSession.key || event.key === null) window.location.reload()
+    }
+    window.addEventListener('storage', syncSession)
+    return () => window.removeEventListener('storage', syncSession)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -38,10 +37,10 @@ export function AuthProvider({ children }) {
     apiClient
       .get('/api/auth/me')
       .then(({ data }) => {
-        if (active) setUser(data.user)
+        if (active && authSession.get() === token) setUser(data.user)
       })
       .catch(() => {
-        if (active) setUser(null)
+        if (active && authSession.get() === token) setUser(null)
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -57,7 +56,7 @@ export function AuthProvider({ children }) {
       email: credentials.email,
       password: credentials.password,
     })
-    return saveSession(data, setUser)
+    return saveAccountSession(data, authSession, setUser)
   }, [])
 
   const register = useCallback(async (details) => {
@@ -66,29 +65,52 @@ export function AuthProvider({ children }) {
       email: details.email,
       password: details.password,
     })
-    return saveSession(data, setUser)
+    saveAccountSession(data, authSession, setUser)
+    return data
   }, [])
 
-  const logout = useCallback(() => {
+  const logout = useCallback((all = false) => revokeAccountSession(
+    apiClient, authSession, () => setUser(null), { all, mock: isMockMode },
+  ), [])
+
+  const clearLocalSession = useCallback(() => {
     authSession.clear()
     setUser(null)
   }, [])
 
+  const changePassword = useCallback(async (details) => {
+    const previousToken = authSession.get()
+    const finishRotation = sessionRotation.begin(previousToken)
+    try {
+      const { data } = await apiClient.post('/api/auth/change-password', details, {
+        pinnedAccountSessionToken: previousToken, sessionRotationRequest: true,
+      })
+      if (authSession.get() !== previousToken) {
+        throw new Error('Your session changed. Sign in again with your new password.')
+      }
+      return saveAccountSession(data, authSession, setUser)
+    } finally {
+      finishRotation()
+    }
+  }, [])
+
   const updateProfile = useCallback(async (details) => {
+    const previousToken = authSession.get()
     const { data } = await apiClient.patch('/api/auth/me', {
       name: details.name,
       email: details.email,
-    })
+      ...(details.currentPassword ? { currentPassword: details.currentPassword } : {}),
+    }, { pinnedAccountSessionToken: previousToken })
     if (!data?.user?.id || typeof data.user.name !== 'string' || typeof data.user.email !== 'string') {
       throw new Error('The server returned an incomplete profile response.')
     }
-    setUser(data.user)
+    if (authSession.get() === previousToken) setUser(data.user)
     return data.user
   }, [])
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout, updateProfile }),
-    [user, loading, login, register, logout, updateProfile],
+    () => ({ user, loading, login, register, logout, clearLocalSession, updateProfile, changePassword }),
+    [user, loading, login, register, logout, clearLocalSession, updateProfile, changePassword],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

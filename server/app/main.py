@@ -20,7 +20,7 @@ import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from dotenv import load_dotenv
 from starlette.concurrency import run_in_threadpool
 
@@ -30,14 +30,21 @@ from app.schemas import (
     LoginInput,
     PaymentVerification,
     ProfileInput,
+    ReauthenticationInput,
+    ChangePasswordInput,
+    RecoveryInput,
     RegisterInput,
     ReviewInput,
     SimulateInput,
     TransactionFeatures,
 )
-from app.security import current_user, hash_password, issue_token, jwt_secret, public_user, verify_password
+from app.security import (
+    current_user, hash_password, issue_token, issue_session, jwt_secret, public_user,
+    verify_password, new_recovery_codes, recovery_digest, session_details,
+)
 from app.config import validate_settings
 from app.middleware import BodySizeLimit
+from app.ml_client import request_model
 from app.storage import Repository, DuplicateRecordError
 
 
@@ -78,19 +85,7 @@ def serialize_transaction(item: dict) -> dict:
 
 
 def ml_call(method: str, path: str, payload=None):
-    base = os.getenv("ML_SERVICE_URL", "").rstrip("/")
-    if not base:
-        raise RuntimeError("ML_SERVICE_URL is not configured.")
-    headers = {}
-    if os.getenv("ML_API_KEY"):
-        headers["X-API-Key"] = os.environ["ML_API_KEY"]
-    timeout = float(os.getenv("ML_TIMEOUT_MS", "60000")) / 1000
-    try:
-        response = httpx.request(method, f"{base}{path}", json=payload, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
-    except (httpx.HTTPError, ValueError) as error:
-        raise RuntimeError("The ML service is unavailable.") from error
+    return request_model(method, path, payload)
 
 
 def score_transaction(features: dict) -> dict:
@@ -270,6 +265,12 @@ async def security_headers(request: Request, call_next):
         limits = [("api", 1200, 15 * 60)]
         if request.url.path in {"/api/auth/login", "/api/auth/register"}:
             limits.append(("auth", 10, 15 * 60))
+        if request.url.path == "/api/auth/recover":
+            limits.append(("recovery", 5, 15 * 60))
+        if request.url.path in {"/api/auth/change-password", "/api/auth/recovery-codes"} or (
+            request.url.path == "/api/auth/me" and request.method == "PATCH"
+        ):
+            limits.append(("account-security", 10, 15 * 60))
         if request.url.path == "/api/transactions/simulate":
             limits.append(("simulate", 10, 15 * 60))
         if request.url.path == "/api/predictions/batch":
@@ -327,6 +328,7 @@ def health(request: Request):
 
 @app.post("/api/auth/register", status_code=201)
 def register(body: RegisterInput, request: Request):
+    recovery_codes = new_recovery_codes()
     user = {
         "name": body.name.strip(),
         "email": str(body.email).lower(),
@@ -335,10 +337,13 @@ def register(body: RegisterInput, request: Request):
         "createdAt": datetime.now(timezone.utc),
     }
     try:
-        user = request.app.state.db.create_user(user)
+        user = request.app.state.db.create_user(user, recovery_hashes=[recovery_digest(code) for code in recovery_codes])
     except DuplicateRecordError:
         fail(409, "An account with this email already exists.", "EMAIL_EXISTS")
-    return {"token": issue_token(str(user["_id"]), user["role"]), "user": public_user(user)}
+    token = issue_session(request.app.state.db, user)
+    if not token:
+        fail(409, "The account changed. Please sign in again.", "ACCOUNT_CHANGED")
+    return {"token": token, "user": public_user(user), "recoveryCodes": recovery_codes}
 
 
 @app.post("/api/auth/login")
@@ -346,7 +351,10 @@ def login(body: LoginInput, request: Request):
     user = request.app.state.db.get_user_by_email(str(body.email).lower())
     if not user or not verify_password(body.password, user.get("passwordHash", "")):
         fail(401, "Email or password is incorrect.", "INVALID_CREDENTIALS")
-    return {"token": issue_token(str(user["_id"]), user.get("role", "merchant")), "user": public_user(user)}
+    token = issue_session(request.app.state.db, user)
+    if not token:
+        fail(401, "Email or password is incorrect.", "INVALID_CREDENTIALS")
+    return {"token": token, "user": public_user(user)}
 
 
 @app.get("/api/auth/me")
@@ -356,16 +364,80 @@ def me(user: dict = Depends(current_user)):
 
 @app.patch("/api/auth/me")
 def update_profile(body: ProfileInput, request: Request, user: dict = Depends(current_user)):
+    if str(body.email).lower() != user["email"]:
+        if body.currentPassword is None:
+            fail(403, "Enter your current password to change your email address.", "CURRENT_PASSWORD_REQUIRED")
+        if not verify_password(body.currentPassword, user["passwordHash"]):
+            fail(403, "The current password is incorrect.", "CURRENT_PASSWORD_INVALID")
     try:
         updated = request.app.state.db.update_user(
             user["_id"], name=body.name, email=str(body.email).lower(),
+            expected_auth_version=user["authVersion"], expected_password_hash=user["passwordHash"],
+            expected_email=user["email"],
         )
     except DuplicateRecordError:
         fail(409, "An account with this email already exists.", "EMAIL_EXISTS")
     if not updated:
-        fail(401, "User account was not found.", "UNAUTHORIZED")
+        fail(409, "Your profile changed. Refresh the page and try again.", "PROFILE_CHANGED")
     # Tokens identify the immutable user ID, so an email edit preserves the session.
     return {"user": public_user(updated)}
+
+
+@app.get("/api/auth/security")
+def account_security(request: Request, user: dict = Depends(current_user)):
+    return {"recoveryCodesRemaining": request.app.state.db.recovery_codes_remaining(user["_id"])}
+
+
+@app.post("/api/auth/recovery-codes")
+def regenerate_recovery_codes(body: ReauthenticationInput, request: Request, user: dict = Depends(current_user)):
+    if not verify_password(body.currentPassword, user["passwordHash"]):
+        fail(403, "The current password is incorrect.", "CURRENT_PASSWORD_INVALID")
+    codes = new_recovery_codes()
+    changed = request.app.state.db.replace_recovery_codes(
+        user["_id"], [recovery_digest(code) for code in codes],
+        expected_password_hash=user["passwordHash"], expected_auth_version=user["authVersion"],
+    )
+    if not changed:
+        fail(401, "The login session is invalid or expired.", "UNAUTHORIZED")
+    return {"recoveryCodes": codes}
+
+
+@app.post("/api/auth/change-password")
+def change_password(body: ChangePasswordInput, request: Request, user: dict = Depends(current_user)):
+    if not verify_password(body.currentPassword, user["passwordHash"]):
+        fail(403, "The current password is incorrect.", "CURRENT_PASSWORD_INVALID")
+    session_id, expires_at = session_details()
+    updated = request.app.state.db.change_password(
+        user["_id"], hash_password(body.newPassword), expected_password_hash=user["passwordHash"],
+        expected_auth_version=user["authVersion"], session_id=session_id, expires_at=expires_at,
+    )
+    if not updated:
+        fail(401, "The login session is invalid or expired.", "UNAUTHORIZED")
+    return {"token": issue_token(updated["_id"], updated["role"], session_id=session_id,
+                                  auth_version=updated["authVersion"], expires_at=expires_at),
+            "user": public_user(updated)}
+
+
+@app.post("/api/auth/recover")
+def recover_account(body: RecoveryInput, request: Request):
+    # The same work and error shape are used for missing emails and invalid codes.
+    recovered = request.app.state.db.recover_password(str(body.email).lower(), recovery_digest(body.recoveryCode),
+                                                     hash_password(body.newPassword))
+    if not recovered:
+        fail(400, "Email or recovery code is incorrect, or the code has already been used.", "INVALID_RECOVERY_CODE")
+    return {"message": "Password reset. Sign in with your new password."}
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(request: Request, user: dict = Depends(current_user)):
+    request.app.state.db.revoke_session(user["_id"], request.state.auth_session_id)
+    return Response(status_code=204)
+
+
+@app.post("/api/auth/logout-all", status_code=204)
+def logout_all(request: Request, user: dict = Depends(current_user)):
+    request.app.state.db.revoke_all_sessions(user["_id"], user["authVersion"])
+    return Response(status_code=204)
 
 
 @app.post("/api/predictions/batch")

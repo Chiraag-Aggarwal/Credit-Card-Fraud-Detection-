@@ -9,6 +9,7 @@ const BatchAnalyzerPage = lazy(() => import('./pages/BatchAnalyzerPage'))
 const FlaggedTransactionsPage = lazy(() => import('./pages/FlaggedTransactionsPage'))
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const RegisterPage = lazy(() => import('./pages/RegisterPage'))
+const RecoverAccountPage = lazy(() => import('./pages/RecoverAccountPage'))
 const CheckoutPage = lazy(() => import('./pages/CheckoutPage'))
 const ProfilePage = lazy(() => import('./pages/ProfilePage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
@@ -21,6 +22,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/recover" element={<RecoverAccountPage />} />
       <Route path="/checkout" element={<CheckoutPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<Layout />}>

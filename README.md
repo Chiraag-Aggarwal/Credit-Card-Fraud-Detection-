@@ -1,14 +1,23 @@
 # Credit Card Fraud Detection
 
-A student project for analysing transaction risk, reviewing suspicious activity, and understanding a trained machine-learning model. It combines a React dashboard, a Python API, PostgreSQL, and a separate Python model service.
+A working academic project for analysing transaction risk, reviewing suspicious activity, and understanding a trained machine-learning model. It combines a React dashboard, a Python API, PostgreSQL, and a separate Python model service.
 
 [Public dashboard](https://credit-card-fraud-detection-demo.onrender.com/)
 
-The existing public dashboard remains a mock demo until the updated services are deployed. The new deployment configuration uses the real API and PostgreSQL with mock mode off. Razorpay checkout stays disabled until credentials are configured.
+The public dashboard uses the real Python API, a Neon PostgreSQL database, and the trained XGBoost service. **Mock mode is off.** Accounts and review decisions are saved in the database. Payment activation is a separate task for the payment integration owner; Razorpay remains disabled.
+
+| Published service | Address |
+| --- | --- |
+| Website | [Open the dashboard](https://credit-card-fraud-detection-demo.onrender.com/) |
+| API health | [Check PostgreSQL connectivity](https://credit-card-fraud-api-lacc.onrender.com/health) |
+| Model health | [Check the trained model](https://credit-card-fraud-detection-75bx.onrender.com/health) |
+
+New accounts start with no transactions. Register, save your recovery codes, and use **Simulate** to analyse historical dataset samples or **Batch AI analysis** to analyse a compatible CSV. The simulation label describes where the transactions came from; their scores are produced by the trained model. Free hosting can take time to start after inactivity.
 
 ## Features
 
 - Registration, login, protected routes, and editing your own name/email.
+- One-time recovery codes, password changes, and revocable login sessions.
 - Dashboard totals, flagged share, average score, activity chart, and histogram.
 - Latest transactions refreshed every five seconds; alerts every 15 seconds.
 - Flagged transactions with date/risk filters, pagination, and manual decisions.
@@ -54,6 +63,7 @@ React dashboard -> Python FastAPI API -> PostgreSQL
 | server/ | Active FastAPI API, SQLAlchemy/PostgreSQL, JWT and Razorpay |
 | server/migrations/ | Versioned database migrations |
 | server/scripts/ | Schema setup and optional MongoDB import |
+| scripts/verify_deployment.py | Read-only checks of the published frontend, API and model |
 | ml-service/ | Model, prediction API, training and evaluation |
 | docs/API_CONTRACT.md | Exact API routes and JSON shapes |
 | render.yaml | Three-service Render deployment configuration |
@@ -127,6 +137,16 @@ Payments start disabled. When test credentials are available, add them only on t
 
 Live payments require Razorpay approval, live credentials, deliberate activation, operational testing and appropriate policies. Automatic refunds/disputes and live fraud prevention are outside this release.
 
+The [payment handoff](docs/PAYMENT_HANDOFF.md) gives the integration owner the exact settings, callback URL and acceptance checks. Publishing the rest of the application does not require payment activation.
+
+## Account recovery
+
+Registration displays a set of recovery codes once. Save them in a password manager or another private place. A code and the account's sign-in email let you set a new password from **Forgot password?** Each code can be used only once; the server stores hashes, not the original codes.
+
+In **My profile**, you can change your password, replace the recovery-code set, or sign out all sessions. Changing the sign-in email requires your current password. Password recovery and password changes invalidate previous login sessions. Existing accounts can generate their first code set from the profile page.
+
+There is no email-sending service or email verification in this deployment. Email is a sign-in identifier, not a verified identity. If both the password and all recovery codes are lost, there is no automatic recovery route. Never put codes or passwords in GitHub issues. See [security guidance](SECURITY.md) and [data handling](PRIVACY.md).
+
 ## Mock mode and preferences
 
 Set VITE_USE_MOCK=true only for a frontend demonstration. Mock responses need no database/model/provider. Example scores are fictional; demo checkout processes no payment. Real builds omit the mock implementation.
@@ -136,3 +156,5 @@ Appearance/language settings are browser-local. Mock profiles are browser-local;
 ## Verification
 
 See [testing instructions](docs/TESTING.md). CI checks the frontend, API against PostgreSQL, and ML service on pushes and pull requests. Tests exercise the saved model, migrations, account isolation, reviews and mocked Razorpay verification/retries. They never make an actual charge.
+
+From the repository root, run `python scripts/verify_deployment.py` for public health, CORS, authentication-boundary and frontend-route checks. The same check is available in GitHub Actions as **Check published website → Run workflow**. It is manual, uses no secrets, and creates no account or payment. Authenticated browser flows and database recovery still need the checks described in the testing and operations guides.

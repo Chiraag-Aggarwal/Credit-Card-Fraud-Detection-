@@ -1,17 +1,20 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { usePreferences } from '../context/PreferencesContext'
+import { isMockMode } from '../api/client'
+import { passwordValidation } from '../utils/passwordValidation'
+import AccountSecurity from '../components/AccountSecurity'
+import FormField from '../components/FormField'
+import LogoutButton from '../components/LogoutButton'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 function fieldsFor(user) {
-  return { name: user?.name || '', email: user?.email || '' }
+  return { name: user?.name || '', email: user?.email || '', currentPassword: '' }
 }
 
 export default function ProfilePage() {
-  const { user, updateProfile, logout } = useAuth()
-  const navigate = useNavigate()
+  const { user, updateProfile } = useAuth()
   const { t } = usePreferences()
   const [form, setForm] = useState(() => fieldsFor(user))
   const [errors, setErrors] = useState({})
@@ -20,6 +23,7 @@ export default function ProfilePage() {
 
   const initials = (user?.name || 'U').trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join('').toUpperCase()
   const isDirty = form.name.trim() !== (user?.name || '') || form.email.trim().toLowerCase() !== (user?.email || '')
+  const emailChanged = form.email.trim().toLowerCase() !== (user?.email || '')
 
   function edit(event) {
     const { name, value } = event.target
@@ -36,10 +40,11 @@ export default function ProfilePage() {
 
   async function save(event) {
     event.preventDefault()
-    const details = { name: form.name.trim(), email: form.email.trim().toLowerCase() }
+    const details = { name: form.name.trim(), email: form.email.trim().toLowerCase(), ...(!isMockMode && emailChanged ? { currentPassword: form.currentPassword } : {}) }
     const nextErrors = {
       name: !details.name || details.name.length > 120,
       email: details.email.length > 254 || !emailPattern.test(details.email),
+      currentPassword: !isMockMode && emailChanged && (!form.currentPassword || passwordValidation(form.currentPassword) === 'too_long'),
     }
     setErrors(nextErrors)
     setStatus('')
@@ -51,7 +56,7 @@ export default function ProfilePage() {
       setStatus('saved')
     } catch (error) {
       const code = error?.response?.data?.error?.code
-      setStatus(code === 'EMAIL_EXISTS' ? 'duplicate' : error?.response?.status === 429 ? 'limited' : 'failed')
+      setStatus(code === 'EMAIL_EXISTS' ? 'duplicate' : code === 'PROFILE_CHANGED' ? 'changed' : ['CURRENT_PASSWORD_INVALID', 'CURRENT_PASSWORD_REQUIRED'].includes(code) ? 'password' : error?.response?.status === 429 ? 'limited' : 'failed')
     } finally {
       setSaving(false)
     }
@@ -61,6 +66,8 @@ export default function ProfilePage() {
     saved: t('Your profile has been updated.', 'आपकी प्रोफ़ाइल अपडेट हो गई है।'),
     duplicate: t('This email is already used by another account.', 'यह ईमेल पहले से किसी अन्य खाते में उपयोग हो रहा है।'),
     limited: t('Too many requests. Please wait a moment and try again.', 'बहुत अधिक अनुरोध हुए हैं। थोड़ा रुककर फिर कोशिश करें।'),
+    password: t('Check your current password to confirm this email change.', 'ईमेल बदलने की पुष्टि के लिए अपना मौजूदा पासवर्ड जाँचें।'),
+    changed: t('Your profile changed in another session. Refresh the page and try again.', 'आपकी प्रोफ़ाइल दूसरे सेशन में बदल गई है। पेज रिफ्रेश करके फिर कोशिश करें।'),
     failed: t('Your profile could not be saved. Please try again.', 'आपकी प्रोफ़ाइल सेव नहीं हो सकी। कृपया फिर कोशिश करें।'),
   }
 
@@ -86,7 +93,7 @@ export default function ProfilePage() {
           {import.meta.env.VITE_USE_MOCK === 'true' && (
             <p className="status-notice text-sm">{t('This is a demo profile stored in this browser. It does not change a real account.', 'यह इस ब्राउज़र में रखी डेमो प्रोफ़ाइल है। इससे असली खाता नहीं बदलता।')}</p>
           )}
-          <button className="ui-button mt-auto" type="button" disabled={saving} onClick={() => { logout(); navigate('/login', { replace: true }) }}>{t('Log out', 'लॉग आउट करें')}</button>
+          <LogoutButton disabled={saving} />
         </section>
 
         <section className="ui-card min-w-0 p-6 sm:p-8">
@@ -106,6 +113,7 @@ export default function ProfilePage() {
               <input autoComplete="email" className="field-input w-full" disabled={saving} id="profile-email" name="email" maxLength={254} required type="email" value={form.email} onChange={edit} aria-invalid={Boolean(errors.email)} aria-describedby={errors.email ? 'profile-email-error' : 'profile-email-help'} />
               {errors.email ? <p className="field-error" id="profile-email-error">{t('Enter a valid email address.', 'सही ईमेल पता लिखें।')}</p> : <p className="text-muted text-sm" id="profile-email-help">{t('Your password stays the same when you change your email.', 'ईमेल बदलने पर आपका पासवर्ड वही रहता है।')}</p>}
             </div>
+            {emailChanged && !isMockMode && <FormField id="profile-current-password" label={t('Confirm with your current password', 'मौजूदा पासवर्ड से पुष्टि करें')} autoComplete="current-password" type="password" disabled={saving} value={form.currentPassword} onChange={(event) => { setForm((previous) => ({ ...previous, currentPassword: event.target.value })); setErrors((previous) => ({ ...previous, currentPassword: false })); setStatus('') }} error={errors.currentPassword && t('Enter your current password (maximum 72 UTF-8 bytes).', 'अपना मौजूदा पासवर्ड लिखें (अधिकतम 72 UTF-8 बाइट)।')} />}
             <div className="flex flex-wrap gap-3 pt-2">
               <button className="ui-button ui-button-primary" type="submit" disabled={saving || !isDirty}>{saving ? t('Saving…', 'सेव हो रहा है…') : t('Save changes', 'बदलाव सेव करें')}</button>
               <button className="ui-button" type="button" onClick={cancel} disabled={saving || !isDirty}>{t('Cancel', 'रद्द करें')}</button>
@@ -113,6 +121,7 @@ export default function ProfilePage() {
           </form>
         </section>
       </div>
+      <AccountSecurity />
     </div>
   )
 }

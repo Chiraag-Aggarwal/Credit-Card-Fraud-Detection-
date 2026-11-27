@@ -9,11 +9,11 @@ class StrictModel(BaseModel):
     def trim_public_text(cls, value):
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("password", check_fields=False)
+    @field_validator("password", "newPassword", "currentPassword", check_fields=False)
     @classmethod
-    def valid_password_bytes(cls, value: str) -> str:
+    def valid_password_bytes(cls, value: str | None) -> str | None:
         # bcrypt must never silently truncate two different passwords to one hash.
-        if len(value.encode("utf-8")) > 72:
+        if value is not None and len(value.encode("utf-8")) > 72:
             raise ValueError("Password must be at most 72 UTF-8 bytes.")
         return value
 
@@ -32,6 +32,21 @@ class LoginInput(StrictModel):
 class ProfileInput(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr = Field(max_length=254)
+    currentPassword: str | None = Field(default=None, min_length=1, max_length=72)
+
+
+class ReauthenticationInput(StrictModel):
+    currentPassword: str = Field(min_length=1, max_length=72)
+
+
+class ChangePasswordInput(ReauthenticationInput):
+    newPassword: str = Field(min_length=8, max_length=72)
+
+
+class RecoveryInput(StrictModel):
+    email: EmailStr = Field(max_length=254)
+    recoveryCode: str = Field(min_length=1, max_length=128)
+    newPassword: str = Field(min_length=8, max_length=72)
 
 
 class SimulateInput(StrictModel):

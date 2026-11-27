@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy import (
     JSON, BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey,
     Index, Integer, Numeric, String, Text, case, create_engine, event, func,
-    inspect, select, text,
+    inspect, select, text, update, delete,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import make_url
@@ -23,7 +23,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import TypeDecorator
 
 
-SCHEMA_REVISION = "0002_legacy_payment_ids"
+SCHEMA_REVISION = "0003_account_security"
 RISK_LABELS = ("LOW", "MEDIUM", "HIGH", "UNSCORED")
 
 
@@ -61,6 +61,29 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(32), default="merchant")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (Index("ix_auth_sessions_user_expires", "user_id", "expires_at"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    auth_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class RecoveryCode(Base):
+    __tablename__ = "recovery_codes"
+    __table_args__ = (Index("ix_recovery_codes_user", "user_id"),)
+
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 
 class Transaction(Base):
@@ -172,7 +195,7 @@ def record_id(data: dict) -> str:
 
 def user_record(row: User) -> dict:
     return {"_id": row.id, "name": row.name, "email": row.email, "passwordHash": row.password_hash,
-            "role": row.role, "createdAt": row.created_at}
+            "role": row.role, "createdAt": row.created_at, "authVersion": row.auth_version}
 
 
 TRANSACTION_FIELDS = {
@@ -241,13 +264,15 @@ class Repository:
             if revisions != {SCHEMA_REVISION}:
                 raise RuntimeError("Database schema is outdated. Run scripts/migrate_database.py.")
 
-    def create_user(self, data: dict) -> dict:
+    def create_user(self, data: dict, *, recovery_hashes: list[str] | None = None) -> dict:
         with self._session() as session:
             row = User(id=record_id(data), name=data["name"], email=data["email"].strip().lower(),
                        password_hash=data["passwordHash"], role=data.get("role", "merchant"),
                        created_at=as_utc(data.get("createdAt") or utc_now()))
             session.add(row)
             session.flush()
+            if recovery_hashes:
+                session.add_all(RecoveryCode(code_hash=digest, user_id=row.id) for digest in recovery_hashes)
             return user_record(row)
 
     def get_user(self, user_id: str) -> dict | None:
@@ -260,14 +285,108 @@ class Repository:
             row = session.scalar(select(User).where(User.email == email.strip().lower()))
             return user_record(row) if row else None
 
-    def update_user(self, user_id: str, *, name: str, email: str) -> dict | None:
+    def update_user(self, user_id: str, *, name: str, email: str,
+                    expected_auth_version: int | None = None,
+                    expected_password_hash: str | None = None,
+                    expected_email: str | None = None) -> dict | None:
         with self._session() as session:
-            row = session.get(User, str(user_id))
-            if row is None:
+            row = session.scalar(select(User).where(User.id == str(user_id)).with_for_update())
+            if row is None or (expected_auth_version is not None and row.auth_version != expected_auth_version):
+                return None
+            if expected_password_hash is not None and row.password_hash != expected_password_hash:
+                return None
+            if expected_email is not None and row.email != expected_email:
                 return None
             row.name, row.email = name, email.strip().lower()
             session.flush()
             return user_record(row)
+
+    def create_auth_session(self, user_id: str, *, expected_password_hash: str,
+                            session_id: str, expires_at: datetime) -> dict | None:
+        """Do not issue a session for a password replaced while bcrypt was running."""
+        with self._session() as session:
+            row = session.scalar(select(User).where(User.id == str(user_id)).with_for_update())
+            if row is None or row.password_hash != expected_password_hash:
+                return None
+            session.execute(delete(AuthSession).where(AuthSession.user_id == row.id, AuthSession.expires_at <= utc_now()))
+            session.add(AuthSession(id=session_id, user_id=row.id, auth_version=row.auth_version,
+                                    expires_at=expires_at))
+            return user_record(row)
+
+    def authenticated_user(self, user_id: str, session_id: str, auth_version: int) -> dict | None:
+        with self._session() as session:
+            row = session.scalar(select(User).join(AuthSession, AuthSession.user_id == User.id).where(
+                User.id == str(user_id), User.auth_version == auth_version,
+                AuthSession.id == session_id, AuthSession.auth_version == auth_version,
+                AuthSession.revoked_at.is_(None), AuthSession.expires_at > utc_now(),
+            ))
+            return user_record(row) if row else None
+
+    def revoke_session(self, user_id: str, session_id: str) -> None:
+        with self._session() as session:
+            session.execute(update(AuthSession).where(AuthSession.id == session_id, AuthSession.user_id == user_id,
+                                                      AuthSession.revoked_at.is_(None)).values(revoked_at=utc_now()))
+
+    def revoke_all_sessions(self, user_id: str, expected_auth_version: int) -> bool:
+        with self._session() as session:
+            result = session.execute(update(User).where(User.id == user_id, User.auth_version == expected_auth_version)
+                                     .values(auth_version=User.auth_version + 1))
+            if result.rowcount != 1:
+                return False
+            session.execute(update(AuthSession).where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+                            .values(revoked_at=utc_now()))
+            return True
+
+    def recovery_codes_remaining(self, user_id: str) -> int:
+        with self._session() as session:
+            return session.scalar(select(func.count()).select_from(RecoveryCode).where(
+                RecoveryCode.user_id == user_id, RecoveryCode.used_at.is_(None)))
+
+    def replace_recovery_codes(self, user_id: str, hashes: list[str], *, expected_password_hash: str,
+                                expected_auth_version: int) -> bool:
+        with self._session() as session:
+            # A guarded write serializes this transaction on SQLite as well as PostgreSQL.
+            result = session.execute(update(User).where(User.id == user_id, User.password_hash == expected_password_hash,
+                                                       User.auth_version == expected_auth_version).values(auth_version=User.auth_version))
+            if result.rowcount != 1:
+                return False
+            session.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user_id))
+            session.add_all(RecoveryCode(code_hash=digest, user_id=user_id) for digest in hashes)
+            return True
+
+    def change_password(self, user_id: str, new_hash: str, *, expected_password_hash: str,
+                        expected_auth_version: int, session_id: str, expires_at: datetime) -> dict | None:
+        with self._session() as session:
+            changed = session.execute(update(User).where(User.id == user_id, User.password_hash == expected_password_hash,
+                                                        User.auth_version == expected_auth_version)
+                                      .values(password_hash=new_hash, auth_version=User.auth_version + 1))
+            if changed.rowcount != 1:
+                return None
+            session.execute(update(AuthSession).where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+                            .values(revoked_at=utc_now()))
+            row = session.get(User, user_id)
+            session.add(AuthSession(id=session_id, user_id=user_id, auth_version=row.auth_version,
+                                    expires_at=expires_at))
+            return user_record(row)
+
+    def recover_password(self, email: str, code_hash: str, new_hash: str) -> bool:
+        with self._session() as session:
+            # Lock the account before touching codes so recovery, regeneration and
+            # password changes cannot resurrect a consumed or invalidated code.
+            locked = session.execute(update(User).where(User.email == email).values(auth_version=User.auth_version))
+            if locked.rowcount != 1:
+                return False
+            row = session.scalar(select(User).where(User.email == email))
+            consumed = session.execute(update(RecoveryCode).where(RecoveryCode.user_id == row.id,
+                                                                  RecoveryCode.code_hash == code_hash,
+                                                                  RecoveryCode.used_at.is_(None)).values(used_at=utc_now()))
+            if consumed.rowcount != 1:
+                return False
+            row.password_hash = new_hash
+            row.auth_version += 1
+            session.execute(update(AuthSession).where(AuthSession.user_id == row.id, AuthSession.revoked_at.is_(None))
+                            .values(revoked_at=utc_now()))
+            return True
 
     def create_transaction(self, data: dict) -> dict:
         values = {attr: data[key] for key, attr in TRANSACTION_FIELDS.items() if key in data}

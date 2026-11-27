@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.main import app, _rate_limit_windows
-from app.security import hash_password, issue_token
+from app.security import hash_password, issue_session
 from app.storage import Repository, database_engine
 from scripts.migrate_database import upgrade_database
 
@@ -67,7 +67,7 @@ class ApiTestCase(unittest.TestCase):
         # setup above exercises real persistence without starting those services.
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
-        self.headers = {"Authorization": "Bearer " + issue_token(self.owner_id, "merchant")}
+        self.headers = {"Authorization": "Bearer " + issue_session(self.repository, self.owner)}
         for method in ("request", "post", "get"):
             network = patch("app.main.httpx." + method, side_effect=AssertionError("Unexpected external HTTP call in API tests"))
             network.start()

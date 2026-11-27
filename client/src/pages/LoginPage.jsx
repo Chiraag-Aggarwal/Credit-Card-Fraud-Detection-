@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import AuthShell from '../components/AuthShell'
 import FormField from '../components/FormField'
 import Icon from '../components/Icon'
+import SlowRequestHint from '../components/SlowRequestHint'
 import { getApiErrorMessage } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { usePreferences } from '../context/PreferencesContext'
@@ -59,12 +60,15 @@ export default function LoginPage() {
       <p className="eyebrow">{t('Welcome back', 'फिर से स्वागत है')}</p>
       <h2 className="mt-2 text-3xl font-bold tracking-tight">{t('Sign in', 'लॉगिन करें')}</h2>
       <p className="text-muted mt-3 text-sm leading-relaxed">{t('Enter your account details to open your dashboard.', 'डैशबोर्ड खोलने के लिए अपने खाते की जानकारी लिखें।')}</p>
+      {location.state?.logoutUnconfirmed && <p className="status-notice mt-4" role="status">{t('Your sign-in was removed from this device, but server sign-out could not be confirmed. When connected, sign in and use Sign out everywhere in My profile to end all sessions.', 'इस डिवाइस से लॉगिन हटा दिया गया है, लेकिन सर्वर पर लॉग आउट की पुष्टि नहीं हो सकी। इंटरनेट आने पर लॉगिन करें और मेरी प्रोफ़ाइल में सभी डिवाइस से लॉग आउट करें।')}</p>}
       <form aria-busy={submitting} className="mt-7 space-y-5" noValidate onSubmit={handleSubmit}>
         {serverError && <p aria-live="polite" className="status-error" role="alert">{getApiErrorMessage(serverError, t('We could not sign you in. Check your details and try again.', 'लॉगिन नहीं हो सका। अपनी जानकारी जाँचकर फिर कोशिश करें।'), language)}</p>}
-        <FormField autoComplete="email" error={errors.email && t(...errors.email)} id="email" label={t('Email address', 'ईमेल पता')} onChange={updateField} placeholder="you@example.com" type="email" value={form.email} />
-        <FormField autoComplete="current-password" error={errors.password && t(...errors.password)} id="password" label={t('Password', 'पासवर्ड')} onChange={updateField} placeholder={t('Your password', 'अपना पासवर्ड')} type="password" value={form.password} />
+        <FormField disabled={submitting} autoComplete="email" error={errors.email && t(...errors.email)} id="email" label={t('Email address', 'ईमेल पता')} onChange={updateField} placeholder="you@example.com" type="email" value={form.email} />
+        <FormField disabled={submitting} autoComplete="current-password" error={errors.password && t(...errors.password)} id="password" label={t('Password', 'पासवर्ड')} onChange={updateField} placeholder={t('Your password', 'अपना पासवर्ड')} type="password" value={form.password} />
         <button className="ui-button ui-button-primary w-full" disabled={submitting} type="submit">{submitting ? t('Signing in…', 'लॉगिन हो रहा है…') : t('Sign in', 'लॉगिन करें')}<Icon name="arrow" size={18} /></button>
+        <SlowRequestHint busy={submitting} />
       </form>
+      <p className="mt-5 text-sm"><Link className="font-semibold underline underline-offset-4" to="/recover">{t('Forgot password?', 'पासवर्ड भूल गए?')}</Link></p>
       <p className="text-muted mt-6 text-sm">{t('New to the dashboard?', 'पहली बार आए हैं?')}{' '}<Link className="font-semibold underline underline-offset-4" to="/register">{t('Create an account', 'नया खाता बनाएँ')}</Link></p>
     </AuthShell>
   )

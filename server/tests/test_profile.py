@@ -10,7 +10,7 @@ from tests.api_test_support import ApiTestCase
 class ProfileTests(ApiTestCase):
 
     def test_update_is_scoped_to_authenticated_user_and_hides_private_fields(self):
-        response = self.client.patch("/api/auth/me", json={"name": "  Updated Name  ", "email": "NEW@EXAMPLE.COM"}, headers=self.headers)
+        response = self.client.patch("/api/auth/me", json={"name": "  Updated Name  ", "email": "NEW@EXAMPLE.COM", "currentPassword": "profile-test-password"}, headers=self.headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"user": {"id": str(self.owner_id), "name": "Updated Name", "email": "new@example.com", "role": "merchant"}})
         self.assertEqual(self.repository.get_user(self.other_id)["name"], "Second User")
@@ -38,7 +38,7 @@ class ProfileTests(ApiTestCase):
         self.assertEqual(self.repository.get_user(self.owner_id)["email"], "first@example.com")
 
     def test_duplicate_email_returns_conflict_without_changing_profile(self):
-        response = self.client.patch("/api/auth/me", json={"name": "Changed", "email": "SECOND@EXAMPLE.COM"}, headers=self.headers)
+        response = self.client.patch("/api/auth/me", json={"name": "Changed", "email": "SECOND@EXAMPLE.COM", "currentPassword": "profile-test-password"}, headers=self.headers)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "EMAIL_EXISTS")
         self.assertEqual(self.repository.get_user(self.owner_id)["name"], "First User")
@@ -48,7 +48,7 @@ class ProfileTests(ApiTestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_existing_token_and_new_email_login_keep_the_same_identity(self):
-        self.client.patch("/api/auth/me", json={"name": "New Name", "email": "new@example.com"}, headers=self.headers)
+        self.client.patch("/api/auth/me", json={"name": "New Name", "email": "new@example.com", "currentPassword": "profile-test-password"}, headers=self.headers)
         current = self.client.get("/api/auth/me", headers=self.headers)
         self.assertEqual(current.status_code, 200)
         self.assertEqual(current.json()["user"]["id"], str(self.owner_id))

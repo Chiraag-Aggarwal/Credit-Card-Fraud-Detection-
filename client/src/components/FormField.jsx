@@ -9,6 +9,7 @@ export default function FormField({
   required = true,
   minLength,
   error,
+  disabled = false,
 }) {
   return (
     <div>
@@ -20,6 +21,7 @@ export default function FormField({
         aria-invalid={Boolean(error)}
         autoComplete={autoComplete}
         className="field-input mt-2 w-full"
+        disabled={disabled}
         id={id}
         minLength={minLength}
         name={id}

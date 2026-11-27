@@ -12,6 +12,7 @@ This document defines the request and response shapes used by the Fraud Detectio
 - Errors use this shape: `{ "error": { "message": "...", "code": "..." } }`.
 - `401` means unauthenticated, `422` means invalid input, and `429` means rate limited.
 - The Python API rate-limits general API traffic to 1,200 requests per 15 minutes per client address; login/registration and simulation each allow 10 requests per 15 minutes.
+- Account recovery allows 5 requests per 15 minutes per client address. Password changes, recovery-code generation and profile updates share a separate limit of 10 requests per 15 minutes. A limit response is `429` with `Retry-After` seconds. These process-local limits supplement high-entropy recovery codes; they are not a distributed abuse-prevention service.
 - Responses use `id`, not `_id`, and never include the 30 model input features.
 
 ## Transaction
@@ -42,6 +43,10 @@ This document defines the request and response shapes used by the Fraud Detectio
 
 ### Authentication
 
+Access JWTs expire after seven days and identify a persisted server session. Every protected request checks that the session and account version are current. Logout revokes the current session; password change, account recovery and logout-all revoke all earlier sessions. Tokens from before the account-security migration are rejected: existing users sign in again with their unchanged password. Session IDs, account versions, password hashes and recovery-code hashes are never included in the public User object.
+
+This release uses saved recovery codes instead of email delivery. An email address is a sign-in identifier and is **not represented as verified**. No reset or verification email is sent.
+
 #### `POST /api/auth/register` - public
 
 Request:
@@ -64,9 +69,12 @@ Request:
     "name": "Avery Merchant",
     "email": "avery@example.com",
     "role": "<role>"
-  }
+  },
+  "recoveryCodes": ["<eight distinct single-use recovery codes>"]
 }
 ```
+
+`recoveryCodes` contains exactly eight codes, each with 128 random bits (32 hexadecimal characters displayed in eight groups of four). This plaintext list is returned once at registration. The client asks the user to save it privately; it must not place codes in URLs, analytics, logs or persistent browser storage. Only hashes are saved in PostgreSQL. Login and `GET /api/auth/me` never return these codes.
 
 #### `POST /api/auth/login` - public
 
@@ -110,14 +118,15 @@ Response:
 
 #### `PATCH /api/auth/me` - token required
 
-Updates only the signed-in user's name and email. Both fields are required; names are trimmed and must be 1–120 characters. Email addresses must be valid, at most 254 characters, and are stored in lowercase. Unknown fields (including `id`, `role`, and `password`) are rejected with `422`.
+Updates only the signed-in user's name and email. Both fields are required; names are trimmed and must be 1–120 characters. Email addresses must be valid, at most 254 characters, and are stored in lowercase. `currentPassword` is optional when the email is unchanged, and required when changing it. Unknown fields (including `id`, `role`, and `password`) are rejected with `422`.
 
 Request:
 
 ```json
 {
   "name": "Avery Merchant",
-  "email": "avery.new@example.com"
+  "email": "avery.new@example.com",
+  "currentPassword": "<current password>"
 }
 ```
 
@@ -125,7 +134,53 @@ Response status is `200`, with the same `{ "user": { "id", "name", "email", "rol
 
 An email already owned by another account returns `409` with `{ "error": { "message": "An account with this email already exists.", "code": "EMAIL_EXISTS" } }`. Missing or invalid authentication returns `401`. Updates are scoped to the authenticated user and never accept a target user ID from the request.
 
+An email change without `currentPassword` returns `403 CURRENT_PASSWORD_REQUIRED`; a wrong password returns `403 CURRENT_PASSWORD_INVALID`. Neither response signs the user out or changes the profile. A name-only change does not require reauthentication.
+
+If the stored email or account security state changes while a profile request is being processed, the write is rejected with `409 PROFILE_CHANGED`. Refresh the profile before retrying. A stale name-only submission cannot silently restore an earlier email address.
+
 In mock mode, demo profiles (never passwords) are saved in browser local storage, separately from real accounts. Stable mock user IDs keep profile edits available across refreshes. Restricted browser storage falls back to the current in-memory session. Mock registration/login remains a demonstration and accepts a password with 8 or more characters.
+
+#### `GET /api/auth/security` - token required
+
+Returns `200 {"recoveryCodesRemaining":8}`. This is a count of the signed-in user's unused codes; codes themselves cannot be retrieved.
+
+#### `POST /api/auth/recovery-codes` - token and current password required
+
+Request: `{"currentPassword":"<current password>"}`.
+
+Returns `200 {"recoveryCodes":["<eight new single-use codes>"]}`. Regeneration atomically invalidates every old code, including any unused ones. The new plaintext codes are returned once. Incorrect current password returns `403 CURRENT_PASSWORD_INVALID`. Existing accounts can use this endpoint to set up recovery.
+
+#### `POST /api/auth/recover` - public
+
+Request:
+
+```json
+{
+  "email": "avery@example.com",
+  "recoveryCode": "<one saved recovery code>",
+  "newPassword": "<new password>"
+}
+```
+
+Returns `200 {"message":"Password reset. Sign in with your new password."}`. No JWT is returned. The client then offers sign-in with the new password. Recovery atomically consumes the code, changes the password and revokes all sessions; concurrent reuse has only one successful caller. The other seven codes remain usable. Codes are case-insensitive and may be entered with or without grouping hyphens/spaces.
+
+Unknown email, incorrect code, another user's code and already-used code all return the same `400` error with code `INVALID_RECOVERY_CODE`. No account existence information is returned. Invalid input returns `422`; exceeding the recovery rate limit returns `429`.
+
+#### `POST /api/auth/change-password` - token and current password required
+
+Request: `{"currentPassword":"<current password>","newPassword":"<new password>"}`.
+
+Returns `200 {"token":"<replacement JWT>","user":{"id":"...","name":"...","email":"...","role":"merchant"}}` with the same User shape as login. All earlier sessions are revoked, including the caller's earlier token; the client stores the replacement token. Unused recovery codes stay valid. Incorrect current password returns `403 CURRENT_PASSWORD_INVALID` without changing anything.
+
+For both password-setting endpoints, `newPassword` requires 8 or more characters and at most 72 UTF-8 bytes. Whitespace is preserved. `currentPassword` has the same 72-byte limit and is never trimmed. Passwords, recovery codes and tokens must never be logged or put in query strings.
+
+#### `POST /api/auth/logout` - token required
+
+No request body. Returns `204` with no response body after revoking the current persisted session. Other sessions remain valid. The client clears its token only after success (or a `401` confirming the session is already invalid), so a network error can be retried.
+
+#### `POST /api/auth/logout-all` - token required
+
+No request body. Returns `204` with no response body after invalidating every session for this account, including the caller's. A new login is allowed. Neither logout operation removes accounts, transactions or review decisions.
 
 ### Transactions
 

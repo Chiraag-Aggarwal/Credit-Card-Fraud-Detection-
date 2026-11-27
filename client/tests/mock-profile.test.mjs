@@ -22,6 +22,15 @@ async function register(adapter, email = 'merchant@example.com') {
   return response.data
 }
 
+test('mock mode never pretends to provide real recovery or session security', async () => {
+  stored.clear()
+  const adapter = await freshAdapter()
+  for (const endpoint of ['recover', 'security', 'recovery-codes', 'change-password', 'logout', 'logout-all']) {
+    await assert.rejects(request(adapter, endpoint === 'security' ? 'get' : 'post', '/api/auth/' + endpoint, { currentPassword: 'must-not-store', recoveryCode: 'must-not-store' }), (error) => error.response.status === 503 && error.response.data.error.code === 'SECURITY_UNAVAILABLE_IN_MOCK')
+  }
+  assert.doesNotMatch([...stored.values()].join(''), /must-not-store/)
+})
+
 test('mock profile retains its stable identity, new email, and name after a reload', async () => {
   stored.clear()
   const adapter = await freshAdapter()

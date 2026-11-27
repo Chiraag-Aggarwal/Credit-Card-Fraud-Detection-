@@ -1,6 +1,8 @@
 # Deploy the dashboard with PostgreSQL
 
-This setup uses a real PostgreSQL database, the Python API, the committed ML model, and a React frontend with mock mode disabled. Razorpay stays disabled until you configure your account. Preparing these files does not provision hosting, activate a payment account, or establish production readiness.
+The published installation uses Neon PostgreSQL, the Python API, the committed ML model, and a React frontend with mock mode disabled. Razorpay is deliberately disabled and assigned to the payment integration owner. This guide also explains how to create a separate installation; copying these files alone does not provision services or activate payments.
+
+Current addresses are listed in the [README](../README.md). For an existing installation, update its connected services instead of creating duplicates. Deploy the API migration and wait for healthy startup before publishing a frontend that depends on new endpoints. Security updates that introduce revocable sessions require users to sign in again.
 
 ## 1. Prepare the repository and database
 
@@ -38,6 +40,17 @@ Create each service from the same repository and branch, in this order. Use Pyth
 
 For manual services, configure automatic deployments to wait for CI checks. The Blueprint already selects this behavior. The migration helper runs before the API accepts requests and can be rerun safely. Free services do not support a separate pre-deploy command; for a paid/scaled deployment, move migrations to `preDeployCommand` and plan schema-compatible releases. See [Render deployment commands](https://render.com/docs/blueprint-spec#service-fields).
 
+On a manually configured frontend, add these response headers for path `/*` under **Headers**. The Blueprint includes them in `render.yaml`:
+
+| Header | Value |
+| --- | --- |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
+
+These prevent content-type guessing and framing, limit referrer details, and disable device permissions the dashboard does not use. They do not replace application authentication or a deployment check.
+
 ## 3. Check the deployed application
 
 Complete these checks against the deployed URLs before sharing the site:
@@ -48,10 +61,15 @@ Complete these checks against the deployed URLs before sharing the site:
 - Run a small transaction simulation. Check that real scores appear, the model information loads, and a scored transaction has an explanation. Simulation uses historical dataset samples and is clearly separate from payments.
 - Refresh a nested frontend route directly. Review a flagged transaction, refresh, and confirm the decision persists. After a normal API redeploy, confirm the account and transaction still exist.
 - Confirm checkout shows payments unavailable while disabled. The authenticated `/api/payments/status` response should contain `enabled: false` and `mode: "disabled"`.
+- Verify recovery-code generation, one-time use and session revocation with a dedicated test account, following [the security checks](TESTING.md#browser-checks-with-real-services).
+
+From the repository root, `python scripts/verify_deployment.py` runs the public read-only checks. Use `--frontend`, `--api`, and `--ml` to supply different HTTPS origins for another installation. The script accepts no credentials and prints no response bodies. It allows a bounded warm-up period for free services; readiness does not imply continuous availability.
 
 If login fails, check `VITE_API_URL`, `CLIENT_URL`, and the API logs. If scores are unavailable, check ML readiness, the public HTTPS ML URL, and matching keys. An unavailable model leaves transactions unscored and awaiting review; it must not produce a fabricated probability.
 
 ## 4. Optional Razorpay test activation
+
+The application owner has deferred this part to their partner. Keep both payment flags false until that owner completes the [payment handoff](PAYMENT_HANDOFF.md). No replacement payment provider is needed to publish and use the account, analysis and review features.
 
 An approved live account is not assumed. You can deploy and use the dashboard while Razorpay remains disabled.
 
@@ -68,3 +86,5 @@ Live processing is a separate step after Razorpay account approval, website veri
 Render's free web services sleep after inactivity, have resource limits, and cannot receive private-network requests. Use the ML service's **public HTTPS** URL, and expect cold starts to delay initial requests or temporarily leave a simulation unscored. Free hosting is suitable for a demonstration; reliable customer payments need measured availability and a hosting plan that meets it. Razorpay webhook delivery deadlines make sleeping services especially unsuitable for claiming reliable live processing. See [Render free-service limits](https://render.com/docs/free) and [Razorpay delivery/retry behavior](https://razorpay.com/docs/webhooks/setup-edit-payments#deactivation).
 
 Keep database backups and rehearse restores using [POSTGRESQL.md](POSTGRESQL.md#backups-and-restore-drills). Review service errors and payment reconciliation after deployments. Rotate shared ML keys on both services together, and expect changing `JWT_SECRET` to sign users out. Keep test and live payment credentials and data distinct.
+
+The manual **Check published website** GitHub workflow is a troubleshooting tool, not continuous monitoring. It is not scheduled and does not create an availability guarantee. Configure any future uptime alerts deliberately, and record the responsible owner and notification destination.

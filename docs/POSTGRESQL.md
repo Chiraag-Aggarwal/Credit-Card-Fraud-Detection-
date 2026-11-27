@@ -26,18 +26,24 @@ checkout order IDs are unique. Monetary display amounts use `NUMERIC(18,2)`;
 checkout amounts use integer paise. Dates are UTC timestamps. Provider webhook
 receipts store an event ID and SHA-256 digest, not raw payment payloads.
 
+The account-security migration adds `auth_sessions`, hashed `recovery_codes`
+and an account authentication version. Existing users and transactions are
+preserved; existing login tokens require a fresh sign-in. Codes are not stored
+in plaintext and cannot be recovered from their database hashes.
+
 Create future revisions with Alembic, inspect the generated SQL and compatibility
 with the current API, then test against a restored database before deployment.
 Use a database role with schema change permissions for migrations. A separate
 runtime role can be limited to connection/schema access and `SELECT`, `INSERT`,
-and `UPDATE` on application tables, plus `SELECT` on `alembic_version`. The app
-uses no sequences and does not delete customer records.
+and `UPDATE` on application tables, plus `SELECT` on `alembic_version`. It also
+needs `DELETE` on `auth_sessions` for expired-session cleanup and on
+`recovery_codes` to replace an old code set. The app uses no sequences and does
+not delete customer accounts or transaction records.
 
 ## Import an existing MongoDB database
 
 This is an optional cutover tool. New installations do not need MongoDB or the
-extra dependency. No live migration or account provisioning has been performed
-by preparing these files.
+extra dependency. It does not run automatically when deploying the application.
 
 1. Export an original MongoDB backup using the existing provider's supported
    backup tooling. Confirm that the backup can be restored. Keep this original
@@ -95,6 +101,16 @@ according to your retention policy; the importer does not remove it.
 
 ## Backups and restore drills
 
+### Published database recovery record — 27 November 2026
+
+The Neon production branch was checked in the hosting console and has a **six-hour point-in-time recovery window**. A manual snapshot named `production at 2026-11-27 08:57:11 UTC (manual)` was created at **14:27 IST on 27 November 2026**. The console showed no expiry for that snapshot.
+
+The Free plan permits one manual snapshot; scheduled snapshots require a plan upgrade. No paid backup schedule has been purchased or enabled. This snapshot preserves the database at that time, not later account or transaction changes. Keep the six-hour recovery window in mind and take a fresh protected backup before future migrations.
+
+At approximately **14:30 IST on 27 November 2026**, the snapshot was restored into a separate Neon branch. SQL connections succeeded on both the production and restored databases. Their migration revision (`0002_legacy_payment_ids`) and the counts of users, transactions and payment checkouts matched. Production connections were not moved, and no restore cutover was performed. This confirms snapshot restoration and basic database parity; the full application was not pointed at the restored branch, so it is not a claim of complete application-level recovery testing. The snapshot predates the account-security migration.
+
+### Backup and restore procedure
+
 Enable the PostgreSQL provider's automatic backups and point-in-time recovery
 where available, and confirm the plan's retention, recovery window, and restore
 permissions. Take an additional backup before a migration or application
@@ -131,6 +147,12 @@ and representative amounts, test login and merchant ownership, and confirm
 webhook receipts remain durable. Disable outbound payment integrations during
 the drill. Record restore time and validation results before considering a
 backup usable.
+
+A restored database also restores its older password, session and recovery-code
+state. Before a real cutover, review security changes made since the backup and
+plan fresh authentication; do not assume a later logout or consumed recovery
+code remains revoked in an older snapshot. A restore drill stays isolated and
+must not receive normal user or payment traffic.
 
 The initial Alembic downgrade intentionally refuses to drop payment data. Roll
 back application code only when schema-compatible, or restore a verified backup

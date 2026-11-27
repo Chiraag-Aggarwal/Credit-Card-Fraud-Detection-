@@ -36,9 +36,9 @@ export default function AuthShell({ children }) {
               <span className="status-badge" data-risk="HIGH">{t('Review', 'जाँच')}</span>
             </div>
           </div>
-          <p className="text-muted text-xs leading-relaxed">{t('A student project for understanding payment fraud and machine learning.', 'भुगतान धोखाधड़ी और मशीन लर्निंग समझने के लिए बनाया गया छात्र प्रोजेक्ट।')}</p>
+          <p className="text-muted text-xs leading-relaxed">{t('A workspace for analysing transactions and reviewing risk.', 'लेनदेन का विश्लेषण और जोखिम की समीक्षा करने के लिए आपका कार्यक्षेत्र।')}</p>
         </section>
-        <section className="auth-form-panel">{children}</section>
+        <section className="auth-form-panel">{children}<p className="text-muted mt-8 text-xs"><a className="underline underline-offset-4" href="https://github.com/Chiraag-Aggarwal/Credit-Card-Fraud-Detection-/blob/main/PRIVACY.md" target="_blank" rel="noopener noreferrer">{t('Privacy & data', 'गोपनीयता और डेटा')}</a></p></section>
       </div>
     </main>
   )

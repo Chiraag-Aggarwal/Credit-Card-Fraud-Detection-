@@ -1,9 +1,10 @@
 import axios from 'axios'
 import { formatApiError } from '../utils/apiErrors'
-import { createAuthSessionStore, shouldExpireSession, usesAccountSession } from '../utils/authSession'
+import { createAuthSessionStore, createSessionRotationGate, shouldExpireAfterRotation, tokenForAccountRequest } from '../utils/authSession'
 
 export const isMockMode = import.meta.env.VITE_USE_MOCK === 'true'
 export const authSession = createAuthSessionStore(isMockMode)
+export const sessionRotation = createSessionRotationGate()
 
 const apiClient = axios.create({
   baseURL: isMockMode ? '' : (import.meta.env.VITE_API_URL || '').trim(),
@@ -18,7 +19,7 @@ if (isMockMode) {
 }
 
 apiClient.interceptors.request.use((config) => {
-  const token = usesAccountSession(config) ? authSession.get() : null
+  const token = tokenForAccountRequest(config, authSession.get())
 
   if (token) {
     config.headers = config.headers || {}
@@ -31,8 +32,8 @@ apiClient.interceptors.request.use((config) => {
 
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (shouldExpireSession(error, authSession.get())) {
+  async (error) => {
+    if (await shouldExpireAfterRotation(error, () => authSession.get(), sessionRotation)) {
       authSession.clear()
 
       if (window.location.pathname !== '/login') {

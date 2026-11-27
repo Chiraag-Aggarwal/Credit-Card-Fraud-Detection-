@@ -46,7 +46,7 @@ export default function ModelCard() {
     }
   }, [requests])
   useEffect(() => { void loadModel() }, [loadModel])
-  if (loading) return <section aria-busy="true" className="ui-card p-5"><div className="skeleton-block h-5 w-36" /><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">{metricLabels.map(([label]) => <div className="skeleton-block h-16" key={label} />)}</div><span className="sr-only" role="status">{t('Loading model information', 'मॉडल की जानकारी लोड हो रही है')}</span></section>
+  if (loading) return <section aria-busy="true" className="ui-card p-5"><h2 className="text-lg font-bold">{t('Model performance', 'मॉडल का प्रदर्शन')}</h2><p className="text-muted mt-2 text-sm" role="status">{t('Connecting to the trained model. The first request after inactivity can take about a minute.', 'प्रशिक्षित मॉडल से जुड़ रहे हैं। कुछ समय बाद की पहली रिक्वेस्ट में करीब एक मिनट लग सकता है।')}</p><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">{metricLabels.map(([label]) => <div className="skeleton-block h-16" key={label} />)}</div></section>
   if (error || !model) return <section className="ui-card p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-bold">{t('Model performance', 'मॉडल का प्रदर्शन')}</h2><p className="text-muted mt-1 text-sm" role="alert">{getApiErrorMessage(error, t('Could not load model information.', 'मॉडल की जानकारी नहीं मिल सकी।'), language)}</p></div><button className="ui-button" onClick={loadModel} type="button">{t('Retry', 'फिर कोशिश करें')}</button></div></section>
   const metrics = model.metrics || {}
   const mock = String(model.model_version).toLowerCase().startsWith('mock')

@@ -461,6 +461,10 @@ export default async function mockApiAdapter(config) {
     const method = String(config.method || 'get').toLowerCase()
     const body = readBody(config)
 
+    if (['/api/auth/security', '/api/auth/recovery-codes', '/api/auth/recover', '/api/auth/change-password', '/api/auth/logout', '/api/auth/logout-all'].includes(pathname)) {
+      rejectRequest(config, 503, 'Account security features require a real account. Mock mode does not save passwords.', 'SECURITY_UNAVAILABLE_IN_MOCK')
+    }
+
     if (method === 'get' && (pathname === '/health' || pathname === '/api/health')) {
       return makeResponse(config, 200, { status: 'ok' })
     }
